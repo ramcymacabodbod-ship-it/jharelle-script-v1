@@ -1,0 +1,463 @@
+-- BSS Floating TrackStats Dashboard w/ Recipe Tabs & Missing Material Calculator
+-- Verified dependency: ClientStatCache
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local ClientStatCache = require(ReplicatedStorage:WaitForChild("ClientStatCache"))
+local NumberCommas = require(ReplicatedStorage:WaitForChild("NumberCommas"))
+
+local TRACKED_ITEMS = {
+    { Name = "Diamond Egg", ID = "Diamond" },
+    { Name = "Tickets", ID = "Ticket" },
+    { Name = "Comforting Vial", ID = "ComfortingVial" },
+    { Name = "Refreshing Vial", ID = "RefreshingVial" },
+    { Name = "Motivating Vial", ID = "MotivatingVial" },
+    { Name = "Satisfying Vial", ID = "SatisfyingVial" },
+    { Name = "Invigorating Vial", ID = "InvigoratingVial" },
+    { Name = "Coconut", ID = "Coconut" },
+    { Name = "Tropical Drink", ID = "TropicalDrink" },
+    { Name = "Star Treat", ID = "StarTreat" },
+    { Name = "Glue", ID = "Glue" },
+    { Name = "Royal Jelly", ID = "RoyalJelly" },
+    { Name = "Star Jelly", ID = "StarJelly" }
+}
+
+local RECIPES = {
+    {
+        Name = "Diamond Mask",
+        Ingredients = {
+            { Name = "Honey", ID = "Honey", Required = 5000000000 },
+            { Name = "Blue Extract", ID = "BlueExtract", Required = 250 },
+            { Name = "Oil", ID = "Oil", Required = 150 },
+            { Name = "Glitter", ID = "Glitter", Required = 100 },
+            { Name = "Diamond Egg", ID = "Diamond", Required = 5 },
+            { Name = "Comforting Vial", ID = "ComfortingVial", Required = 1 }
+        }
+    },
+    {
+        Name = "Crimson Guard",
+        Ingredients = {
+            { Name = "Honey", ID = "Honey", Required = 200000000 },
+            { Name = "Red Extract", ID = "RedExtract", Required = 100 },
+            { Name = "Stinger", ID = "Stinger", Required = 100 },
+            { Name = "Oil", ID = "Oil", Required = 50 },
+            { Name = "Glitter", ID = "Glitter", Required = 25 }
+        }
+    },
+    {
+        Name = "Cobalt Guard",
+        Ingredients = {
+            { Name = "Honey", ID = "Honey", Required = 200000000 },
+            { Name = "Blue Extract", ID = "BlueExtract", Required = 100 },
+            { Name = "Stinger", ID = "Stinger", Required = 100 },
+            { Name = "Enzymes", ID = "Enzymes", Required = 50 },
+            { Name = "Glitter", ID = "Glitter", Required = 25 }
+        }
+    },
+    {
+        Name = "Petal Belt",
+        Ingredients = {
+            { Name = "Honey", ID = "Honey", Required = 15000000000 },
+            { Name = "Star Jelly", ID = "StarJelly", Required = 25 },
+            { Name = "Glitter", ID = "Glitter", Required = 50 },
+            { Name = "Glue", ID = "Glue", Required = 100 },
+            { Name = "Spirit Petal", ID = "SpiritPetal", Required = 1 }
+        }
+    }
+}
+
+-- Crafting Recipes
+local CRAFTING_RECIPES = {
+    ["BlueExtract"] = {
+        { ID = "Blueberry", Name = "Blueberries", Req = 50 },
+        { ID = "RoyalJelly", Name = "Royal Jelly", Req = 10 }
+    },
+    ["Oil"] = {
+        { ID = "SunflowerSeed", Name = "Sunflower Seeds", Req = 50 },
+        { ID = "RoyalJelly", Name = "Royal Jelly", Req = 10 }
+    },
+    ["Glitter"] = {
+        { ID = "MoonCharm", Name = "Moon Charms", Req = 25 },
+        { ID = "MagicBean", Name = "Magic Bean", Req = 1 }
+    },
+    ["RedExtract"] = {
+        { ID = "Strawberry", Name = "Strawberries", Req = 50 },
+        { ID = "RoyalJelly", Name = "Royal Jelly", Req = 10 }
+    },
+    ["Glue"] = {
+        { ID = "Gumdrop", Name = "Gumdrops", Req = 50 },
+        { ID = "RoyalJelly", Name = "Royal Jelly", Req = 10 }
+    }
+}
+
+-- GUI Initialization
+local guiName = "BSS_TrackStats_Floating"
+if CoreGui:FindFirstChild(guiName) then CoreGui[guiName]:Destroy() end
+if LocalPlayer.PlayerGui:FindFirstChild(guiName) then LocalPlayer.PlayerGui[guiName]:Destroy() end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = guiName
+screenGui.ResetOnSpawn = false
+pcall(function() screenGui.Parent = CoreGui end)
+if not screenGui.Parent then screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+-- Main Dashboard
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 360, 0, 320)
+mainFrame.Position = UDim2.new(0.64, 0, 0.05, 0)
+mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+mainFrame.BorderSizePixel = 0
+mainFrame.ClipsDescendants = true
+mainFrame.Parent = screenGui
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 8)
+local stroke = Instance.new("UIStroke", mainFrame)
+stroke.Color = Color3.fromRGB(80, 80, 100)
+stroke.Thickness = 1
+
+-- Title Bar (Drag Area)
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 30)
+titleBar.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = mainFrame
+
+local titleText = Instance.new("TextLabel")
+titleText.Size = UDim2.new(1, -60, 1, 0)
+titleText.Position = UDim2.new(0, 10, 0, 0)
+titleText.BackgroundTransparency = 1
+titleText.Text = "≡ TrackStats"
+titleText.TextColor3 = Color3.fromRGB(220, 220, 220)
+titleText.Font = Enum.Font.GothamBold
+titleText.TextSize = 14
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.Parent = titleBar
+
+-- Controls
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.new(0, 30, 1, 0)
+minBtn.Position = UDim2.new(1, -60, 0, 0)
+minBtn.BackgroundTransparency = 1
+minBtn.Text = "-"
+minBtn.TextColor3 = Color3.new(1, 1, 1)
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 14
+minBtn.Parent = titleBar
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 30, 1, 0)
+closeBtn.Position = UDim2.new(1, -30, 0, 0)
+closeBtn.BackgroundTransparency = 1
+closeBtn.Text = "X"
+closeBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 14
+closeBtn.Parent = titleBar
+
+-- Tab Navigation
+local tabBar = Instance.new("Frame")
+tabBar.Size = UDim2.new(1, 0, 0, 25)
+tabBar.Position = UDim2.new(0, 0, 0, 30)
+tabBar.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+tabBar.BorderSizePixel = 0
+tabBar.Parent = mainFrame
+
+local tabLayout = Instance.new("UIListLayout")
+tabLayout.FillDirection = Enum.FillDirection.Horizontal
+tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+tabLayout.Parent = tabBar
+
+-- Content Container
+local contentFrame = Instance.new("ScrollingFrame")
+contentFrame.Size = UDim2.new(1, -10, 1, -60)
+contentFrame.Position = UDim2.new(0, 5, 0, 55)
+contentFrame.BackgroundTransparency = 1
+contentFrame.ScrollBarThickness = 4
+contentFrame.Parent = mainFrame
+local contentLayout = Instance.new("UIListLayout")
+contentLayout.SortOrder = Enum.SortOrder.LayoutOrder
+contentLayout.Padding = UDim.new(0, 5)
+contentLayout.Parent = contentFrame
+
+-- Tab Switching Logic
+local tabs = {}
+local activeTab = "Inventory"
+
+local function createTabBtn(name, order)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0.2, 0, 1, 0)
+    btn.BackgroundColor3 = (name == activeTab) and Color3.fromRGB(40, 40, 50) or Color3.fromRGB(25, 25, 30)
+    btn.BorderSizePixel = 0
+    btn.Text = name == "Inventory" and "Inv" or name:gsub(" Guard", "G"):gsub(" Mask", "M"):gsub(" Belt", "B")
+    btn.TextColor3 = (name == activeTab) and Color3.new(1,1,1) or Color3.fromRGB(150, 150, 150)
+    btn.Font = Enum.Font.Gotham
+    btn.TextSize = 11
+    btn.LayoutOrder = order
+    btn.Parent = tabBar
+    tabs[name] = btn
+    
+    btn.MouseButton1Click:Connect(function()
+        activeTab = name
+        for tName, tBtn in pairs(tabs) do
+            tBtn.BackgroundColor3 = (tName == activeTab) and Color3.fromRGB(40, 40, 50) or Color3.fromRGB(25, 25, 30)
+            tBtn.TextColor3 = (tName == activeTab) and Color3.new(1,1,1) or Color3.fromRGB(150, 150, 150)
+        end
+    end)
+end
+
+createTabBtn("Inventory", 1)
+for i, rec in ipairs(RECIPES) do
+    createTabBtn(rec.Name, i + 1)
+end
+
+-- Draggable Logic (Responsive & Bounded)
+local dragging, dragInput, dragStart, startPos
+titleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+
+titleBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        local vp = workspace.CurrentCamera.ViewportSize
+        local startX = (startPos.X.Scale * vp.X) + startPos.X.Offset
+        local startY = (startPos.Y.Scale * vp.Y) + startPos.Y.Offset
+        local newX = math.clamp(startX + delta.X, 0, vp.X - mainFrame.AbsoluteSize.X)
+        local newY = math.clamp(startY + delta.Y, 0, vp.Y - mainFrame.AbsoluteSize.Y)
+        mainFrame.Position = UDim2.new(0, newX, 0, newY)
+    end
+end)
+
+-- Window Controls
+local isMinimized = false
+minBtn.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    mainFrame.Size = isMinimized and UDim2.new(0, 360, 0, 30) or UDim2.new(0, 360, 0, 320)
+    minBtn.Text = isMinimized and "+" or "-"
+end)
+closeBtn.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+
+-- Rendering Helpers
+local function clearContent()
+    for _, child in ipairs(contentFrame:GetChildren()) do
+        if not child:IsA("UIListLayout") then child:Destroy() end
+    end
+end
+
+-- Update Logic
+local function updateInventory()
+    local stats = ClientStatCache:Get()
+    if not stats or type(stats.Eggs) ~= "table" then return end
+    
+    local inv = stats.Eggs
+    local honey = (stats.Totals and stats.Totals.Honey) or stats.Honey or 0
+    
+    clearContent()
+    
+    if activeTab == "Inventory" then
+        contentLayout.FillDirection = Enum.FillDirection.Horizontal
+        contentLayout.Wraps = true
+        for i, item in ipairs(TRACKED_ITEMS) do
+            local card = Instance.new("Frame")
+            card.Size = UDim2.new(0.5, -5, 0, 30)
+            card.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+            Instance.new("UICorner", card).CornerRadius = UDim.new(0, 4)
+            card.LayoutOrder = i
+            card.Parent = contentFrame
+            
+            local nameLbl = Instance.new("TextLabel")
+            nameLbl.Size = UDim2.new(1, -10, 0.5, 0)
+            nameLbl.Position = UDim2.new(0, 5, 0, 2)
+            nameLbl.BackgroundTransparency = 1
+            nameLbl.Text = item.Name
+            nameLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+            nameLbl.Font = Enum.Font.Gotham
+            nameLbl.TextSize = 10
+            nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+            nameLbl.Parent = card
+            
+            local valLbl = Instance.new("TextLabel")
+            valLbl.Size = UDim2.new(1, -10, 0.5, 0)
+            valLbl.Position = UDim2.new(0, 5, 0.5, -2)
+            valLbl.BackgroundTransparency = 1
+            valLbl.Text = tostring(NumberCommas(inv[item.ID] or 0))
+            valLbl.TextColor3 = Color3.new(1, 1, 1)
+            valLbl.Font = Enum.Font.GothamBold
+            valLbl.TextSize = 14
+            valLbl.TextXAlignment = Enum.TextXAlignment.Left
+            valLbl.Parent = card
+        end
+        contentFrame.CanvasSize = UDim2.new(0, 0, 0, math.ceil(#TRACKED_ITEMS / 2) * 35)
+    else
+        contentLayout.FillDirection = Enum.FillDirection.Vertical
+        contentLayout.Wraps = false
+        
+        local targetRecipe
+        for _, r in ipairs(RECIPES) do
+            if r.Name == activeTab then targetRecipe = r break end
+        end
+        
+        if targetRecipe then
+            local reqsMet = 0
+            for _, ing in ipairs(targetRecipe.Ingredients) do
+                local currentQty = (ing.ID == "Honey") and honey or (inv[ing.ID] or 0)
+                if currentQty >= ing.Required then reqsMet = reqsMet + 1 end
+            end
+            
+            -- Header
+            local header = Instance.new("TextLabel")
+            header.Size = UDim2.new(1, 0, 0, 20)
+            header.BackgroundTransparency = 1
+            header.Text = string.format("%s — %d/%d Requirements Complete", string.upper(targetRecipe.Name), reqsMet, #targetRecipe.Ingredients)
+            header.TextColor3 = Color3.fromRGB(254, 200, 9)
+            header.Font = Enum.Font.GothamBold
+            header.TextSize = 12
+            header.LayoutOrder = 1
+            header.Parent = contentFrame
+            
+            -- Track available inventory cumulatively so shared materials (like Royal Jelly) aren't double-counted
+            local remainingInv = {}
+            for k, v in pairs(inv) do remainingInv[k] = v end
+
+            local totalCanvasHeight = 25
+            for i, ing in ipairs(targetRecipe.Ingredients) do
+                local currentQty = (ing.ID == "Honey") and honey or (inv[ing.ID] or 0)
+                local missingQty = math.max(ing.Required - currentQty, 0)
+                local isComplete = currentQty >= ing.Required
+                local craftRecipe = CRAFTING_RECIPES[ing.ID]
+                
+                local cardHeight = 50
+                if missingQty > 0 and craftRecipe then
+                    cardHeight = 50 + 20 + (#craftRecipe * 45)
+                end
+                
+                -- Read-only Frame
+                local card = Instance.new("Frame")
+                card.Size = UDim2.new(1, -5, 0, cardHeight)
+                card.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+                Instance.new("UICorner", card).CornerRadius = UDim.new(0, 4)
+                card.LayoutOrder = i + 1
+                card.Parent = contentFrame
+                
+                totalCanvasHeight = totalCanvasHeight + cardHeight + 5
+                
+                local titleLbl = Instance.new("TextLabel")
+                titleLbl.Size = UDim2.new(1, -10, 0, 15)
+                titleLbl.Position = UDim2.new(0, 5, 0, 5)
+                titleLbl.BackgroundTransparency = 1
+                titleLbl.Text = ing.Name
+                titleLbl.TextColor3 = Color3.new(1, 1, 1)
+                titleLbl.Font = Enum.Font.GothamBold
+                titleLbl.TextSize = 12
+                titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+                titleLbl.Parent = card
+                
+                local progLbl = Instance.new("TextLabel")
+                progLbl.Size = UDim2.new(1, -10, 0, 15)
+                progLbl.Position = UDim2.new(0, 5, 0, 20)
+                progLbl.BackgroundTransparency = 1
+                progLbl.Text = string.format("%s / %s", NumberCommas(currentQty), NumberCommas(ing.Required))
+                progLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+                progLbl.Font = Enum.Font.Gotham
+                progLbl.TextSize = 11
+                progLbl.TextXAlignment = Enum.TextXAlignment.Left
+                progLbl.Parent = card
+                
+                local statusLbl = Instance.new("TextLabel")
+                statusLbl.Size = UDim2.new(1, -10, 0, 15)
+                statusLbl.Position = UDim2.new(0, 5, 0, 35)
+                statusLbl.BackgroundTransparency = 1
+                statusLbl.Text = isComplete and "Complete" or string.format("Missing: %s", NumberCommas(missingQty))
+                statusLbl.TextColor3 = isComplete and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
+                statusLbl.Font = Enum.Font.GothamBold
+                statusLbl.TextSize = 11
+                statusLbl.TextXAlignment = Enum.TextXAlignment.Left
+                statusLbl.Parent = card
+                
+                if missingQty > 0 and craftRecipe then
+                    local craftHeader = Instance.new("TextLabel")
+                    craftHeader.Size = UDim2.new(1, -10, 0, 15)
+                    craftHeader.Position = UDim2.new(0, 5, 0, 50)
+                    craftHeader.BackgroundTransparency = 1
+                    craftHeader.Text = "Crafting materials:"
+                    craftHeader.TextColor3 = Color3.fromRGB(200, 200, 255)
+                    craftHeader.Font = Enum.Font.GothamSemibold
+                    craftHeader.TextSize = 10
+                    craftHeader.TextXAlignment = Enum.TextXAlignment.Left
+                    craftHeader.Parent = card
+                    
+                    local yOffset = 65
+                    for _, mat in ipairs(craftRecipe) do
+                        local matNeeded = missingQty * mat.Req
+                        local matOwnedTotal = inv[mat.ID] or 0
+                        
+                        -- Allocate available inventory strictly once across the whole recipe
+                        local allocated = math.min(matNeeded, remainingInv[mat.ID] or 0)
+                        local matStillNeed = matNeeded - allocated
+                        remainingInv[mat.ID] = (remainingInv[mat.ID] or 0) - allocated
+                        
+                        local matNameLbl = Instance.new("TextLabel")
+                        matNameLbl.Size = UDim2.new(1, -15, 0, 15)
+                        matNameLbl.Position = UDim2.new(0, 10, 0, yOffset)
+                        matNameLbl.BackgroundTransparency = 1
+                        matNameLbl.Text = string.format("%s — Required: %s", mat.Name, NumberCommas(matNeeded))
+                        matNameLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+                        matNameLbl.Font = Enum.Font.Gotham
+                        matNameLbl.TextSize = 10
+                        matNameLbl.TextXAlignment = Enum.TextXAlignment.Left
+                        matNameLbl.Parent = card
+                        
+                        local matOwnedLbl = Instance.new("TextLabel")
+                        matOwnedLbl.Size = UDim2.new(1, -15, 0, 15)
+                        matOwnedLbl.Position = UDim2.new(0, 10, 0, yOffset + 15)
+                        matOwnedLbl.BackgroundTransparency = 1
+                        matOwnedLbl.Text = string.format("Owned: %s", NumberCommas(matOwnedTotal))
+                        matOwnedLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+                        matOwnedLbl.Font = Enum.Font.Gotham
+                        matOwnedLbl.TextSize = 10
+                        matOwnedLbl.TextXAlignment = Enum.TextXAlignment.Left
+                        matOwnedLbl.Parent = card
+
+                        local matNeedLbl = Instance.new("TextLabel")
+                        matNeedLbl.Size = UDim2.new(1, -15, 0, 15)
+                        matNeedLbl.Position = UDim2.new(0, 10, 0, yOffset + 30)
+                        matNeedLbl.BackgroundTransparency = 1
+                        matNeedLbl.Text = string.format("Still need: %s", NumberCommas(matStillNeed))
+                        matNeedLbl.TextColor3 = (matStillNeed == 0) and Color3.fromRGB(150, 200, 150) or Color3.fromRGB(200, 150, 150)
+                        matNeedLbl.Font = Enum.Font.GothamBold
+                        matNeedLbl.TextSize = 10
+                        matNeedLbl.TextXAlignment = Enum.TextXAlignment.Left
+                        matNeedLbl.Parent = card
+                        
+                        yOffset = yOffset + 45
+                    end
+                end
+            end
+            contentFrame.CanvasSize = UDim2.new(0, 0, 0, totalCanvasHeight)
+        end
+    end
+end
+
+-- Live Polling
+task.spawn(function()
+    while task.wait(1) do
+        pcall(updateInventory)
+    end
+end)
+updateInventory()
