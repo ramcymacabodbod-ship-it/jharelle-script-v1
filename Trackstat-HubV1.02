@@ -1,0 +1,989 @@
+-- TRACKSTATS HUB (Side-Nav Redesign matching Wireframe)
+-- Features: Inventory, Blender Monitor, Recipe Tracker, Continuous Exact-Quantity Auto Buy
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local ClientStatCache = require(ReplicatedStorage:WaitForChild("ClientStatCache"))
+local NumberCommas = require(ReplicatedStorage:WaitForChild("NumberCommas"))
+local Events = require(ReplicatedStorage:WaitForChild("Events"))
+local BlenderRecipesModule = require(ReplicatedStorage:WaitForChild("BlenderRecipes"))
+
+local TRACKED_ITEMS = {
+    { Name = "Diamond Egg", ID = "Diamond" },
+    { Name = "Tickets", ID = "Ticket" },
+    { Name = "Comforting Vial", ID = "ComfortingVial" },
+    { Name = "Refreshing Vial", ID = "RefreshingVial" },
+    { Name = "Motivating Vial", ID = "MotivatingVial" },
+    { Name = "Satisfying Vial", ID = "SatisfyingVial" },
+    { Name = "Invigorating Vial", ID = "InvigoratingVial" },
+    { Name = "Coconut", ID = "Coconut" },
+    { Name = "Tropical Drink", ID = "TropicalDrink" },
+    { Name = "Star Treat", ID = "StarTreat" },
+    { Name = "Glue", ID = "Glue" },
+    { Name = "Royal Jelly", ID = "RoyalJelly" },
+    { Name = "Star Jelly", ID = "StarJelly" }
+}
+
+local RECIPES = {
+    {
+        Name = "Diamond Mask",
+        Ingredients = {
+            { Name = "Honey", ID = "Honey", Required = 5000000000 },
+            { Name = "Blue Extract", ID = "BlueExtract", Required = 250 },
+            { Name = "Oil", ID = "Oil", Required = 150 },
+            { Name = "Glitter", ID = "Glitter", Required = 100 },
+            { Name = "Diamond Egg", ID = "Diamond", Required = 5 },
+            { Name = "Comforting Vial", ID = "ComfortingVial", Required = 1 }
+        }
+    },
+    {
+        Name = "Crimson Guard",
+        Ingredients = {
+            { Name = "Honey", ID = "Honey", Required = 200000000 },
+            { Name = "Red Extract", ID = "RedExtract", Required = 100 },
+            { Name = "Stinger", ID = "Stinger", Required = 100 },
+            { Name = "Oil", ID = "Oil", Required = 50 },
+            { Name = "Glitter", ID = "Glitter", Required = 25 }
+        }
+    },
+    {
+        Name = "Cobalt Guard",
+        Ingredients = {
+            { Name = "Honey", ID = "Honey", Required = 200000000 },
+            { Name = "Blue Extract", ID = "BlueExtract", Required = 100 },
+            { Name = "Stinger", ID = "Stinger", Required = 100 },
+            { Name = "Enzymes", ID = "Enzymes", Required = 50 },
+            { Name = "Glitter", ID = "Glitter", Required = 25 }
+        }
+    },
+    {
+        Name = "Petal Belt",
+        Ingredients = {
+            { Name = "Honey", ID = "Honey", Required = 15000000000 },
+            { Name = "Star Jelly", ID = "StarJelly", Required = 25 },
+            { Name = "Glitter", ID = "Glitter", Required = 50 },
+            { Name = "Glue", ID = "Glue", Required = 100 },
+            { Name = "Spirit Petal", ID = "SpiritPetal", Required = 1 }
+        }
+    }
+}
+
+local CRAFTING_RECIPES = {
+    ["BlueExtract"] = {
+        { ID = "Blueberry", Name = "Blueberries", Req = 50 },
+        { ID = "RoyalJelly", Name = "Royal Jelly", Req = 10 }
+    },
+    ["Oil"] = {
+        { ID = "SunflowerSeed", Name = "Sunflower Seeds", Req = 50 },
+        { ID = "RoyalJelly", Name = "Royal Jelly", Req = 10 }
+    },
+    ["Glitter"] = {
+        { ID = "MoonCharm", Name = "Moon Charms", Req = 25 },
+        { ID = "MagicBean", Name = "Magic Bean", Req = 1 }
+    },
+    ["RedExtract"] = {
+        { ID = "Strawberry", Name = "Strawberries", Req = 50 },
+        { ID = "RoyalJelly", Name = "Royal Jelly", Req = 10 }
+    },
+    ["Glue"] = {
+        { ID = "Gumdrop", Name = "Gumdrops", Req = 50 },
+        { ID = "RoyalJelly", Name = "Royal Jelly", Req = 10 }
+    }
+}
+
+-- Safe Real-Time Honey Fetcher
+local function getLiveHoney(stats)
+    local coreStats = LocalPlayer:FindFirstChild("CoreStats")
+    if coreStats and coreStats:FindFirstChild("Honey") then
+        return coreStats.Honey.Value
+    end
+    return (stats.Totals and stats.Totals.Honey) or stats.Honey or 0
+end
+
+-- GUI Initialization
+local guiName = "BSS_TrackStats_Hub"
+if CoreGui:FindFirstChild(guiName) then CoreGui[guiName]:Destroy() end
+if LocalPlayer.PlayerGui:FindFirstChild(guiName) then LocalPlayer.PlayerGui[guiName]:Destroy() end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = guiName
+screenGui.ResetOnSpawn = false
+pcall(function() screenGui.Parent = CoreGui end)
+if not screenGui.Parent then screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+-- Main Dashboard
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 520, 0, 350)
+mainFrame.Position = UDim2.new(0.5, -260, 0.2, 0)
+mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+mainFrame.BorderSizePixel = 0
+mainFrame.ClipsDescendants = true
+mainFrame.Parent = screenGui
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
+local stroke = Instance.new("UIStroke", mainFrame)
+stroke.Color = Color3.fromRGB(80, 80, 100)
+stroke.Thickness = 1
+
+-- Title Bar (Drag Area)
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 30)
+titleBar.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = mainFrame
+
+local titleText = Instance.new("TextLabel")
+titleText.Size = UDim2.new(1, -60, 1, 0)
+titleText.Position = UDim2.new(0, 15, 0, 0)
+titleText.BackgroundTransparency = 1
+titleText.Text = "≡ TRACKSTATS HUB"
+titleText.TextColor3 = Color3.fromRGB(220, 220, 220)
+titleText.Font = Enum.Font.GothamBold
+titleText.TextSize = 13
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.Parent = titleBar
+
+-- Controls
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.new(0, 30, 1, 0)
+minBtn.Position = UDim2.new(1, -60, 0, 0)
+minBtn.BackgroundTransparency = 1
+minBtn.Text = "-"
+minBtn.TextColor3 = Color3.new(1, 1, 1)
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 16
+minBtn.Parent = titleBar
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 30, 1, 0)
+closeBtn.Position = UDim2.new(1, -30, 0, 0)
+closeBtn.BackgroundTransparency = 1
+closeBtn.Text = "X"
+closeBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 13
+closeBtn.Parent = titleBar
+
+-- Left Sidebar Navigation
+local sidebar = Instance.new("Frame")
+sidebar.Size = UDim2.new(0, 150, 1, -30)
+sidebar.Position = UDim2.new(0, 0, 0, 30)
+sidebar.BackgroundTransparency = 1
+sidebar.Parent = mainFrame
+
+local tabLayout = Instance.new("UIListLayout")
+tabLayout.FillDirection = Enum.FillDirection.Vertical
+tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+tabLayout.Padding = UDim.new(0, 10)
+tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+tabLayout.Parent = sidebar
+
+local sidebarPadding = Instance.new("UIPadding")
+sidebarPadding.PaddingTop = UDim.new(0, 15)
+sidebarPadding.Parent = sidebar
+
+-- Right Content Box
+local contentBox = Instance.new("Frame")
+contentBox.Size = UDim2.new(1, -165, 1, -45)
+contentBox.Position = UDim2.new(0, 155, 0, 38)
+contentBox.BackgroundColor3 = Color3.fromRGB(26, 26, 33)
+Instance.new("UICorner", contentBox).CornerRadius = UDim.new(0, 8)
+local cbStroke = Instance.new("UIStroke", contentBox)
+cbStroke.Color = Color3.fromRGB(70, 70, 90)
+contentBox.Parent = mainFrame
+
+-- General Confirmation Dialog
+local confirmDialog = Instance.new("Frame")
+confirmDialog.Size = UDim2.new(1, -20, 1, -20)
+confirmDialog.Position = UDim2.new(0, 10, 0, 10)
+confirmDialog.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+confirmDialog.Visible = false
+confirmDialog.ZIndex = 10
+Instance.new("UICorner", confirmDialog).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", confirmDialog).Color = Color3.fromRGB(100, 100, 120)
+confirmDialog.Parent = contentBox
+
+local dialogText = Instance.new("TextLabel")
+dialogText.Size = UDim2.new(1, -20, 1, -50)
+dialogText.Position = UDim2.new(0, 10, 0, 10)
+dialogText.BackgroundTransparency = 1
+dialogText.TextColor3 = Color3.new(1, 1, 1)
+dialogText.Font = Enum.Font.Gotham
+dialogText.TextSize = 12
+dialogText.TextXAlignment = Enum.TextXAlignment.Left
+dialogText.TextYAlignment = Enum.TextYAlignment.Top
+dialogText.ZIndex = 11
+dialogText.Parent = confirmDialog
+
+local btnContainer = Instance.new("Frame")
+btnContainer.Size = UDim2.new(1, 0, 0, 30)
+btnContainer.Position = UDim2.new(0, 0, 1, -40)
+btnContainer.BackgroundTransparency = 1
+btnContainer.ZIndex = 11
+btnContainer.Parent = confirmDialog
+
+local yesBtn = Instance.new("TextButton")
+yesBtn.Size = UDim2.new(0.4, 0, 1, 0)
+yesBtn.Position = UDim2.new(0.05, 0, 0, 0)
+yesBtn.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+yesBtn.Text = "Yes"
+yesBtn.TextColor3 = Color3.new(1,1,1)
+yesBtn.Font = Enum.Font.GothamBold
+yesBtn.ZIndex = 12
+Instance.new("UICorner", yesBtn).CornerRadius = UDim.new(0, 4)
+yesBtn.Parent = btnContainer
+
+local noBtn = Instance.new("TextButton")
+noBtn.Size = UDim2.new(0.4, 0, 1, 0)
+noBtn.Position = UDim2.new(0.55, 0, 0, 0)
+noBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+noBtn.Text = "No"
+noBtn.TextColor3 = Color3.new(1,1,1)
+noBtn.Font = Enum.Font.GothamBold
+noBtn.ZIndex = 12
+Instance.new("UICorner", noBtn).CornerRadius = UDim.new(0, 4)
+noBtn.Parent = btnContainer
+
+-- Content Scrolling Container
+local contentFrame = Instance.new("ScrollingFrame")
+contentFrame.Size = UDim2.new(1, -10, 1, -10)
+contentFrame.Position = UDim2.new(0, 5, 0, 5)
+contentFrame.BackgroundTransparency = 1
+contentFrame.ScrollBarThickness = 4
+contentFrame.Parent = contentBox
+local contentLayout = Instance.new("UIListLayout")
+contentLayout.SortOrder = Enum.SortOrder.LayoutOrder
+contentLayout.Padding = UDim.new(0, 5)
+contentLayout.Parent = contentFrame
+
+-- Tab Switching Logic
+local tabs = {}
+local activeTab = "Inventory"
+
+-- Continuous Monitoring State Trackers
+local autoBuyEnabled = true
+local isPurchasing = false
+local consecutiveFails = 0
+local autoBuyStatusMsg = "Initializing..."
+local lastActiveTab = nil
+local lastBlenderStateStr = nil
+local currentConfirmAction = nil
+
+local function createTabBtn(name, order)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -20, 0, 28)
+    btn.BackgroundColor3 = (name == activeTab) and Color3.fromRGB(60, 60, 75) or Color3.fromRGB(30, 30, 38)
+    btn.BorderSizePixel = 0
+    btn.Text = name
+    btn.TextColor3 = (name == activeTab) and Color3.new(1,1,1) or Color3.fromRGB(180, 180, 180)
+    btn.Font = Enum.Font.GothamMedium
+    btn.TextSize = 11
+    btn.LayoutOrder = order
+    
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(1, 0) 
+    local btnStroke = Instance.new("UIStroke", btn)
+    btnStroke.Color = Color3.fromRGB(80, 80, 100)
+    btnStroke.Thickness = 1
+    
+    btn.Parent = sidebar
+    tabs[name] = btn
+    
+    btn.MouseButton1Click:Connect(function()
+        activeTab = name
+        for tName, tBtn in pairs(tabs) do
+            tBtn.BackgroundColor3 = (tName == activeTab) and Color3.fromRGB(60, 60, 75) or Color3.fromRGB(30, 30, 38)
+            tBtn.TextColor3 = (tName == activeTab) and Color3.new(1,1,1) or Color3.fromRGB(180, 180, 180)
+        end
+        confirmDialog.Visible = false
+        contentFrame.Visible = true
+    end)
+end
+
+createTabBtn("Inventory", 1)
+createTabBtn("Blender", 2)
+createTabBtn("Auto Buy", 3)
+for i, rec in ipairs(RECIPES) do
+    createTabBtn(rec.Name, i + 3)
+end
+
+-- Confirmation Dialog Actions
+noBtn.MouseButton1Click:Connect(function()
+    confirmDialog.Visible = false
+    contentFrame.Visible = true
+    currentConfirmAction = nil
+end)
+
+yesBtn.MouseButton1Click:Connect(function()
+    if currentConfirmAction then currentConfirmAction() end
+    confirmDialog.Visible = false
+    contentFrame.Visible = true
+    currentConfirmAction = nil
+end)
+
+-- Draggable Logic
+local dragging, dragInput, dragStart, startPos
+titleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+titleBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        local vp = workspace.CurrentCamera.ViewportSize
+        local startX = (startPos.X.Scale * vp.X) + startPos.X.Offset
+        local startY = (startPos.Y.Scale * vp.Y) + startPos.Y.Offset
+        local newX = math.clamp(startX + delta.X, 0, vp.X - mainFrame.AbsoluteSize.X)
+        local newY = math.clamp(startY + delta.Y, 0, vp.Y - mainFrame.AbsoluteSize.Y)
+        mainFrame.Position = UDim2.new(0, newX, 0, newY)
+    end
+end)
+
+-- Window Controls
+local isMinimized = false
+minBtn.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    mainFrame.Size = isMinimized and UDim2.new(0, 520, 0, 30) or UDim2.new(0, 520, 0, 350)
+    minBtn.Text = isMinimized and "+" or "-"
+end)
+closeBtn.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+
+local function clearContent()
+    for _, child in ipairs(contentFrame:GetChildren()) do
+        if not child:IsA("UIListLayout") then child:Destroy() end
+    end
+end
+
+-- Main Update Logic
+local function updateInventory()
+    local stats = ClientStatCache:Get()
+    if type(stats) ~= "table" then return end
+    
+    local inv = stats.Eggs or {}
+    local honey = getLiveHoney(stats)
+    
+    if confirmDialog.Visible then return end
+    
+    local blenderState = ClientStatCache:Get("BlenderState")
+    local currentBlenderStateStr = blenderState and (blenderState.Recipe .. "_" .. blenderState.Count) or "None"
+    
+    local needsRebuild = false
+    if activeTab ~= lastActiveTab then
+        needsRebuild = true
+    end
+    if activeTab == "Blender" and currentBlenderStateStr ~= lastBlenderStateStr then
+        needsRebuild = true
+    end
+    
+    if needsRebuild then
+        clearContent()
+        lastActiveTab = activeTab
+        lastBlenderStateStr = currentBlenderStateStr
+    end
+    
+    -- EXACT QUANTITY AUTO BUY CALCULATION
+    local totalRjRequired = 0
+    local totalDiamondRequired = 0
+    
+    for _, recipe in ipairs(RECIPES) do
+        local isOwned = false
+        if type(stats.Equipment) == "table" and table.find(stats.Equipment, recipe.Name) then
+            isOwned = true
+        elseif type(stats.Equipped) == "table" then
+            for _, eq in pairs(stats.Equipped) do
+                if eq == recipe.Name then isOwned = true break end
+            end
+        elseif inv[recipe.Name] and inv[recipe.Name] > 0 then
+            isOwned = true
+        end
+        
+        if not isOwned then
+            for _, ing in ipairs(recipe.Ingredients) do
+                local currentQty = (ing.ID == "Honey") and honey or (inv[ing.ID] or 0)
+                local missingQty = math.max(ing.Required - currentQty, 0)
+                if missingQty > 0 then
+                    if ing.ID == "Diamond" then
+                        totalDiamondRequired = totalDiamondRequired + missingQty
+                    end
+                    local craftRecipe = CRAFTING_RECIPES[ing.ID]
+                    if craftRecipe then
+                        for _, mat in ipairs(craftRecipe) do
+                            if mat.ID == "RoyalJelly" then
+                                totalRjRequired = totalRjRequired + (missingQty * mat.Req)
+                            end
+                        end
+                    end
+                    if ing.ID == "RoyalJelly" then
+                        totalRjRequired = totalRjRequired + missingQty
+                    end
+                end
+            end
+        end
+    end
+    
+    local currentRj = inv["RoyalJelly"] or 0
+    local actualMissingRj = math.max(totalRjRequired - currentRj, 0)
+    
+    local currentDiamond = inv["Diamond"] or 0
+    local actualMissingDiamond = math.max(totalDiamondRequired - currentDiamond, 0)
+    
+    -- PROCESS PURCHASES THREAD-SAFELY (Continuous Loop)
+    if autoBuyEnabled and not isPurchasing then
+        if consecutiveFails >= 3 then
+            autoBuyEnabled = false
+            autoBuyStatusMsg = "Error: Purchases repeatedly failed (Funds/Limits). Auto Buy paused."
+            local abCard = contentFrame:FindFirstChild("AutoBuyCard")
+            if abCard and abCard:FindFirstChild("ToggleBtn") then
+                abCard.ToggleBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+                abCard.ToggleBtn.Text = "Auto Buy: OFF"
+            end
+        elseif actualMissingDiamond > 0 then
+            isPurchasing = true
+            autoBuyStatusMsg = "Purchasing " .. NumberCommas(actualMissingDiamond) .. " Diamond Eggs..."
+            task.spawn(function()
+                local prevQty = inv["Diamond"] or 0
+                pcall(function()
+                    ReplicatedStorage:WaitForChild("Events"):WaitForChild("ItemPackageEvent"):InvokeServer("Purchase", {
+                        Type = "Diamond",
+                        Category = "Eggs",
+                        Amount = actualMissingDiamond
+                    })
+                end)
+                task.wait(1.5) -- Wait for server processing and replication
+                local newInv = ClientStatCache:Get().Eggs or {}
+                if (newInv["Diamond"] or 0) <= prevQty then
+                    consecutiveFails = consecutiveFails + 1
+                else
+                    consecutiveFails = 0
+                end
+                isPurchasing = false
+            end)
+        elseif actualMissingRj > 0 then
+            isPurchasing = true
+            autoBuyStatusMsg = "Purchasing " .. NumberCommas(actualMissingRj) .. " Royal Jelly..."
+            task.spawn(function()
+                local prevQty = inv["RoyalJelly"] or 0
+                pcall(function()
+                    ReplicatedStorage:WaitForChild("Events"):WaitForChild("ItemPackageEvent"):InvokeServer("Purchase", {
+                        Type = "RoyalJelly",
+                        Category = "Eggs",
+                        Amount = actualMissingRj
+                    })
+                end)
+                task.wait(1.5) -- Wait for server processing and replication
+                local newInv = ClientStatCache:Get().Eggs or {}
+                if (newInv["RoyalJelly"] or 0) <= prevQty then
+                    consecutiveFails = consecutiveFails + 1
+                else
+                    consecutiveFails = 0
+                end
+                isPurchasing = false
+            end)
+        else
+            autoBuyStatusMsg = "Idle (Monitoring...)"
+            consecutiveFails = 0
+        end
+    elseif not autoBuyEnabled then
+        autoBuyStatusMsg = "Manually Stopped"
+    end
+    
+    -- TAB RENDERING
+    if activeTab == "Inventory" then
+        contentLayout.FillDirection = Enum.FillDirection.Horizontal
+        contentLayout.Wraps = true
+        for i, item in ipairs(TRACKED_ITEMS) do
+            local cardName = "InvCard_" .. item.ID
+            local card = contentFrame:FindFirstChild(cardName)
+            if not card then
+                card = Instance.new("Frame")
+                card.Name = cardName
+                card.Size = UDim2.new(0.5, -5, 0, 35)
+                card.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+                Instance.new("UICorner", card).CornerRadius = UDim.new(0, 4)
+                card.LayoutOrder = i
+                card.Parent = contentFrame
+                
+                local nameLbl = Instance.new("TextLabel")
+                nameLbl.Size = UDim2.new(1, -10, 0.5, 0)
+                nameLbl.Position = UDim2.new(0, 8, 0, 2)
+                nameLbl.BackgroundTransparency = 1
+                nameLbl.Text = item.Name
+                nameLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+                nameLbl.Font = Enum.Font.Gotham
+                nameLbl.TextSize = 10
+                nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+                nameLbl.Parent = card
+                
+                local valLbl = Instance.new("TextLabel")
+                valLbl.Name = "ValLbl"
+                valLbl.Size = UDim2.new(1, -10, 0.5, 0)
+                valLbl.Position = UDim2.new(0, 8, 0.5, -2)
+                valLbl.BackgroundTransparency = 1
+                valLbl.TextColor3 = Color3.new(1, 1, 1)
+                valLbl.Font = Enum.Font.GothamBold
+                valLbl.TextSize = 14
+                valLbl.TextXAlignment = Enum.TextXAlignment.Left
+                valLbl.Parent = card
+            end
+            local currentVal = (item.ID == "Honey") and honey or (inv[item.ID] or 0)
+            card.ValLbl.Text = tostring(NumberCommas(currentVal))
+        end
+        contentFrame.CanvasSize = UDim2.new(0, 0, 0, math.ceil(#TRACKED_ITEMS / 2) * 40)
+        
+    elseif activeTab == "Auto Buy" then
+        contentLayout.FillDirection = Enum.FillDirection.Vertical
+        contentLayout.Wraps = false
+        
+        local header = contentFrame:FindFirstChild("AutoBuyHeader")
+        if not header then
+            header = Instance.new("TextLabel")
+            header.Name = "AutoBuyHeader"
+            header.Size = UDim2.new(1, 0, 0, 25)
+            header.BackgroundTransparency = 1
+            header.Text = "AUTO BUY ASSETS"
+            header.TextColor3 = Color3.fromRGB(254, 200, 9)
+            header.Font = Enum.Font.GothamBold
+            header.TextSize = 13
+            header.LayoutOrder = 1
+            header.Parent = contentFrame
+        end
+
+        local card = contentFrame:FindFirstChild("AutoBuyCard")
+        if not card then
+            card = Instance.new("Frame")
+            card.Name = "AutoBuyCard"
+            card.Size = UDim2.new(1, -5, 0, 160)
+            card.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+            Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
+            card.LayoutOrder = 2
+            card.Parent = contentFrame
+            
+            local infoLbl = Instance.new("TextLabel")
+            infoLbl.Name = "InfoLbl"
+            infoLbl.Size = UDim2.new(1, -20, 0, 100)
+            infoLbl.Position = UDim2.new(0, 10, 0, 10)
+            infoLbl.BackgroundTransparency = 1
+            infoLbl.TextColor3 = Color3.new(1, 1, 1)
+            infoLbl.Font = Enum.Font.Gotham
+            infoLbl.TextSize = 11
+            infoLbl.TextXAlignment = Enum.TextXAlignment.Left
+            infoLbl.TextYAlignment = Enum.TextYAlignment.Top
+            infoLbl.Parent = card
+            
+            local toggleBtn = Instance.new("TextButton")
+            toggleBtn.Name = "ToggleBtn"
+            toggleBtn.Size = UDim2.new(0.5, 0, 0, 30)
+            toggleBtn.Position = UDim2.new(0.25, 0, 0, 115)
+            toggleBtn.BackgroundColor3 = autoBuyEnabled and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(150, 50, 50)
+            toggleBtn.Text = autoBuyEnabled and "Auto Buy: ON" or "Auto Buy: OFF"
+            toggleBtn.TextColor3 = Color3.new(1, 1, 1)
+            toggleBtn.Font = Enum.Font.GothamBold
+            toggleBtn.TextSize = 12
+            Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 4)
+            toggleBtn.Parent = card
+            
+            toggleBtn.MouseButton1Click:Connect(function()
+                autoBuyEnabled = not autoBuyEnabled
+                if autoBuyEnabled then
+                    consecutiveFails = 0 -- Reset error state on manual resume
+                    autoBuyStatusMsg = "Resuming..."
+                end
+                toggleBtn.BackgroundColor3 = autoBuyEnabled and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(150, 50, 50)
+                toggleBtn.Text = autoBuyEnabled and "Auto Buy: ON" or "Auto Buy: OFF"
+                pcall(updateInventory)
+            end)
+        end
+        
+        local infoText = string.format(
+            "Target Royal Jelly: %s | Missing: %s\nTarget Diamond Egg: %s | Missing: %s\n\nAvailable Honey: %s\nAvailable Tickets: %s\n\nStatus: %s",
+            NumberCommas(totalRjRequired),
+            NumberCommas(actualMissingRj),
+            NumberCommas(totalDiamondRequired),
+            NumberCommas(actualMissingDiamond),
+            NumberCommas(honey),
+            NumberCommas(inv["Ticket"] or 0),
+            autoBuyStatusMsg
+        )
+        card.InfoLbl.Text = infoText
+        contentFrame.CanvasSize = UDim2.new(0, 0, 0, 200)
+
+    elseif activeTab == "Blender" then
+        contentLayout.FillDirection = Enum.FillDirection.Vertical
+        contentLayout.Wraps = false
+
+        local ticketsOwned = inv["Ticket"] or 0
+        
+        local header = contentFrame:FindFirstChild("BlenderHeader")
+        if not header then
+            header = Instance.new("TextLabel")
+            header.Name = "BlenderHeader"
+            header.Size = UDim2.new(1, 0, 0, 25)
+            header.BackgroundTransparency = 1
+            header.Text = "BLENDER MONITOR"
+            header.TextColor3 = Color3.fromRGB(254, 200, 9)
+            header.Font = Enum.Font.GothamBold
+            header.TextSize = 13
+            header.LayoutOrder = 1
+            header.Parent = contentFrame
+        end
+
+        local card = contentFrame:FindFirstChild("BlenderCard")
+        if not card then
+            card = Instance.new("Frame")
+            card.Name = "BlenderCard"
+            card.Size = UDim2.new(1, -5, 0, 160)
+            card.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+            Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
+            card.LayoutOrder = 2
+            card.Parent = contentFrame
+            
+            if not blenderState then
+                local msg = Instance.new("TextLabel")
+                msg.Size = UDim2.new(1, -10, 1, -10)
+                msg.Position = UDim2.new(0, 5, 0, 5)
+                msg.BackgroundTransparency = 1
+                msg.Text = "No active crafting.\nThe Blender is currently idle."
+                msg.TextColor3 = Color3.fromRGB(150, 150, 150)
+                msg.Font = Enum.Font.Gotham
+                msg.TextSize = 12
+                msg.TextWrapped = true
+                msg.Parent = card
+            else
+                local infoLbl = Instance.new("TextLabel")
+                infoLbl.Name = "InfoLbl"
+                infoLbl.Size = UDim2.new(1, -20, 0, 90)
+                infoLbl.Position = UDim2.new(0, 10, 0, 10)
+                infoLbl.BackgroundTransparency = 1
+                infoLbl.TextColor3 = Color3.new(1, 1, 1)
+                infoLbl.Font = Enum.Font.Gotham
+                infoLbl.TextSize = 12
+                infoLbl.TextXAlignment = Enum.TextXAlignment.Left
+                infoLbl.TextYAlignment = Enum.TextYAlignment.Top
+                infoLbl.Parent = card
+                
+                local ticketsLbl = Instance.new("TextLabel")
+                ticketsLbl.Name = "TicketsLbl"
+                ticketsLbl.Size = UDim2.new(1, -20, 0, 15)
+                ticketsLbl.Position = UDim2.new(0, 10, 0, 100)
+                ticketsLbl.BackgroundTransparency = 1
+                ticketsLbl.Font = Enum.Font.Gotham
+                ticketsLbl.TextSize = 10
+                ticketsLbl.TextXAlignment = Enum.TextXAlignment.Left
+                ticketsLbl.Parent = card
+                
+                local stopBtn = Instance.new("TextButton")
+                stopBtn.Size = UDim2.new(0.4, 0, 0, 25)
+                stopBtn.Position = UDim2.new(0.05, 0, 0, 125)
+                stopBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+                stopBtn.Text = "End Crafting"
+                stopBtn.TextColor3 = Color3.new(1, 1, 1)
+                stopBtn.Font = Enum.Font.GothamBold
+                stopBtn.TextSize = 11
+                Instance.new("UICorner", stopBtn).CornerRadius = UDim.new(0, 4)
+                stopBtn.Parent = card
+                
+                local speedBtn = Instance.new("TextButton")
+                speedBtn.Name = "SpeedBtn"
+                speedBtn.Size = UDim2.new(0.4, 0, 0, 25)
+                speedBtn.Position = UDim2.new(0.55, 0, 0, 125)
+                speedBtn.BackgroundColor3 = Color3.fromRGB(50, 100, 150)
+                speedBtn.Text = "Speed Up"
+                speedBtn.TextColor3 = Color3.new(1, 1, 1)
+                speedBtn.Font = Enum.Font.GothamBold
+                speedBtn.TextSize = 11
+                Instance.new("UICorner", speedBtn).CornerRadius = UDim.new(0, 4)
+                speedBtn.Parent = card
+                
+                stopBtn.MouseButton1Click:Connect(function()
+                    local bState = ClientStatCache:Get("BlenderState")
+                    local rName = bState and bState.Recipe or "Unknown"
+                    dialogText.Text = string.format("Are you sure you want to stop crafting %s?", rName)
+                    currentConfirmAction = function()
+                        Events.ClientCall("BlenderCommand", "StopOrder")
+                        ClientStatCache:Set("BlenderState", nil)
+                        lastBlenderStateStr = "None"
+                    end
+                    contentFrame.Visible = false
+                    confirmDialog.Visible = true
+                end)
+            end
+        end
+
+        if blenderState then
+            local recipeName = blenderState.Recipe
+            local count = blenderState.Count
+            local startTime = blenderState.StartTime
+            
+            local recipeData = BlenderRecipesModule.Get(recipeName)
+            local timePerItem = recipeData and recipeData.Time or 300
+            local autoCompletePerTicket = recipeData and recipeData.AutoCompletePerTicket or 1
+            local totalDuration = count * timePerItem
+            
+            local playtimeAtLoad = ClientStatCache:Get("PlaytimeAtLoad")
+            local loadTime = ClientStatCache:Get("LoadTime")
+            local offlineProgressTime = ClientStatCache:Get("OfflineProgressTime") or 0
+            
+            local remainingSecs = 0
+            local isFinished = false
+            local progressPct = 0
+            local uiText = ""
+            local ticketsNeeded = 0
+            
+            if playtimeAtLoad and loadTime then
+                local osTime = require(game.ReplicatedStorage:WaitForChild("OsTime"))()
+                local currentTime = playtimeAtLoad + offlineProgressTime + (osTime - loadTime)
+                local elapsed = currentTime - startTime
+                
+                remainingSecs = math.max(0, totalDuration - elapsed)
+                isFinished = (elapsed >= totalDuration)
+                progressPct = math.clamp(elapsed / totalDuration, 0, 1)
+                
+                local completedItems = math.floor(progressPct * count)
+                local paidItems = math.floor(completedItems / autoCompletePerTicket) * autoCompletePerTicket
+                local itemsToPayFor = count - paidItems
+                ticketsNeeded = math.ceil(itemsToPayFor / autoCompletePerTicket)
+                
+                local hrs = math.floor(remainingSecs / 3600)
+                local mins = math.floor((remainingSecs % 3600) / 60)
+                local secs = math.floor(remainingSecs % 60)
+                local timeFormatted = string.format("%02d:%02d:%02d", hrs, mins, secs)
+                
+                local statusText = isFinished and "Finished" or "Crafting"
+                uiText = string.format("Currently Crafting:\n%s\n\nStatus: %s\nTime Remaining: %s\n\nQuantity: %s",
+                    recipeName, statusText, isFinished and "00:00:00" or timeFormatted, NumberCommas(count))
+            else
+                uiText = string.format("Currently Crafting:\n%s\n\nStatus: Crafting\nTime Remaining: Time unavailable\n\nQuantity: %s",
+                    recipeName, NumberCommas(count))
+            end
+
+            card.InfoLbl.Text = uiText
+            card.TicketsLbl.Text = string.format("Tickets Needed: %s  |  Tickets Owned: %s", NumberCommas(ticketsNeeded), NumberCommas(ticketsOwned))
+            card.TicketsLbl.TextColor3 = (ticketsOwned >= ticketsNeeded) and Color3.fromRGB(150, 200, 150) or Color3.fromRGB(255, 100, 100)
+            
+            local speedBtn = card.SpeedBtn
+            if isFinished or ticketsNeeded <= 0 then
+                speedBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+                speedBtn.AutoButtonColor = false
+                speedBtn:SetAttribute("CanClick", false)
+            else
+                speedBtn.BackgroundColor3 = Color3.fromRGB(50, 100, 150)
+                speedBtn.AutoButtonColor = true
+                speedBtn:SetAttribute("CanClick", true)
+                speedBtn:SetAttribute("TicketsNeeded", ticketsNeeded)
+                speedBtn:SetAttribute("RecipeName", recipeName)
+            end
+            
+            if not speedBtn:GetAttribute("Connected") then
+                speedBtn.MouseButton1Click:Connect(function()
+                    if not speedBtn:GetAttribute("CanClick") then return end
+                    local tNeeded = speedBtn:GetAttribute("TicketsNeeded")
+                    local rName = speedBtn:GetAttribute("RecipeName")
+                    local currentTix = (ClientStatCache:Get().Eggs and ClientStatCache:Get().Eggs["Ticket"]) or 0
+                    
+                    if currentTix < tNeeded then return end
+                    dialogText.Text = string.format("Speed up %s for %s Tickets?", rName, NumberCommas(tNeeded))
+                    currentConfirmAction = function()
+                        Events.ClientCall("BlenderCommand", "SpeedUpOrder")
+                        ClientStatCache:Set("BlenderState", nil)
+                        lastBlenderStateStr = "None"
+                    end
+                    contentFrame.Visible = false
+                    confirmDialog.Visible = true
+                end)
+                speedBtn:SetAttribute("Connected", true)
+            end
+        end
+        contentFrame.CanvasSize = UDim2.new(0, 0, 0, 200)
+
+    else
+        -- RECIPE TABS
+        contentLayout.FillDirection = Enum.FillDirection.Vertical
+        contentLayout.Wraps = false
+        
+        local targetRecipe
+        for _, r in ipairs(RECIPES) do
+            if r.Name == activeTab then targetRecipe = r break end
+        end
+        
+        if targetRecipe then
+            local isOwned = false
+            if type(stats.Equipment) == "table" and table.find(stats.Equipment, targetRecipe.Name) then
+                isOwned = true
+            elseif type(stats.Equipped) == "table" then
+                for _, eq in pairs(stats.Equipped) do
+                    if eq == targetRecipe.Name then isOwned = true break end
+                end
+            elseif inv[targetRecipe.Name] and inv[targetRecipe.Name] > 0 then
+                isOwned = true
+            end
+            
+            local missingCount = 0
+            for _, ing in ipairs(targetRecipe.Ingredients) do
+                local currentQty = (ing.ID == "Honey") and honey or (inv[ing.ID] or 0)
+                if currentQty < ing.Required then missingCount = missingCount + 1 end
+            end
+            
+            local header = contentFrame:FindFirstChild("RecHeaderLbl")
+            if not header then
+                header = Instance.new("TextLabel")
+                header.Name = "RecHeaderLbl"
+                header.Size = UDim2.new(1, 0, 0, 35)
+                header.BackgroundTransparency = 1
+                header.Font = Enum.Font.GothamBold
+                header.TextSize = 12
+                header.LayoutOrder = 1
+                header.Parent = contentFrame
+            end
+            
+            if isOwned then
+                header.Text = string.format("✅ %s [OWNED]", string.upper(targetRecipe.Name))
+                header.TextColor3 = Color3.fromRGB(100, 255, 100)
+            else
+                header.Text = string.format("%s\nMissing Requirements: %d / %d", string.upper(targetRecipe.Name), missingCount, #targetRecipe.Ingredients)
+                header.TextColor3 = Color3.fromRGB(254, 200, 9)
+            end
+            
+            local totalCanvasHeight = 40
+            local remainingInv = {}
+            for k, v in pairs(inv) do remainingInv[k] = v end
+            
+            for i, ing in ipairs(targetRecipe.Ingredients) do
+                local currentQty = (ing.ID == "Honey") and honey or (inv[ing.ID] or 0)
+                local missingQty = math.max(ing.Required - currentQty, 0)
+                local isComplete = currentQty >= ing.Required
+                local craftRecipe = CRAFTING_RECIPES[ing.ID]
+                
+                local cardHeight = 50
+                local showCrafting = missingQty > 0 and craftRecipe ~= nil
+                if showCrafting then
+                    cardHeight = 50 + 20 + (#craftRecipe * 20)
+                end
+                
+                local cardName = "RecCard_" .. ing.ID
+                local card = contentFrame:FindFirstChild(cardName)
+                
+                if not card then
+                    card = Instance.new("Frame")
+                    card.Name = cardName
+                    card.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+                    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
+                    card.LayoutOrder = i + 1
+                    card.Parent = contentFrame
+                    
+                    local titleLbl = Instance.new("TextLabel")
+                    titleLbl.Name = "TitleLbl"
+                    titleLbl.Size = UDim2.new(1, -10, 0, 15)
+                    titleLbl.Position = UDim2.new(0, 10, 0, 5)
+                    titleLbl.BackgroundTransparency = 1
+                    titleLbl.Text = ing.Name
+                    titleLbl.TextColor3 = Color3.new(1, 1, 1)
+                    titleLbl.Font = Enum.Font.GothamBold
+                    titleLbl.TextSize = 12
+                    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+                    titleLbl.Parent = card
+                    
+                    local progLbl = Instance.new("TextLabel")
+                    progLbl.Name = "ProgLbl"
+                    progLbl.Size = UDim2.new(1, -10, 0, 15)
+                    progLbl.Position = UDim2.new(0, 10, 0, 20)
+                    progLbl.BackgroundTransparency = 1
+                    progLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+                    progLbl.Font = Enum.Font.Gotham
+                    progLbl.TextSize = 11
+                    progLbl.TextXAlignment = Enum.TextXAlignment.Left
+                    progLbl.Parent = card
+                    
+                    local statusLbl = Instance.new("TextLabel")
+                    statusLbl.Name = "StatusLbl"
+                    statusLbl.Size = UDim2.new(1, -10, 0, 15)
+                    statusLbl.Position = UDim2.new(0, 10, 0, 35)
+                    statusLbl.BackgroundTransparency = 1
+                    statusLbl.Font = Enum.Font.GothamBold
+                    statusLbl.TextSize = 11
+                    statusLbl.TextXAlignment = Enum.TextXAlignment.Left
+                    statusLbl.Parent = card
+                    
+                    if craftRecipe then
+                        local craftHeader = Instance.new("TextLabel")
+                        craftHeader.Name = "CraftHeader"
+                        craftHeader.Size = UDim2.new(1, -10, 0, 15)
+                        craftHeader.Position = UDim2.new(0, 10, 0, 50)
+                        craftHeader.BackgroundTransparency = 1
+                        craftHeader.Text = "Crafting materials:"
+                        craftHeader.TextColor3 = Color3.fromRGB(200, 200, 255)
+                        craftHeader.Font = Enum.Font.GothamSemibold
+                        craftHeader.TextSize = 10
+                        craftHeader.TextXAlignment = Enum.TextXAlignment.Left
+                        craftHeader.Parent = card
+                        
+                        local yOffset = 65
+                        for j, mat in ipairs(craftRecipe) do
+                            local matLineLbl = Instance.new("TextLabel")
+                            matLineLbl.Name = "MatLine_" .. j
+                            matLineLbl.Size = UDim2.new(1, -15, 0, 15)
+                            matLineLbl.Position = UDim2.new(0, 15, 0, yOffset)
+                            matLineLbl.BackgroundTransparency = 1
+                            matLineLbl.Font = Enum.Font.Gotham
+                            matLineLbl.TextSize = 10
+                            matLineLbl.TextXAlignment = Enum.TextXAlignment.Left
+                            matLineLbl.Parent = card
+                            yOffset = yOffset + 20
+                        end
+                    end
+                end
+                
+                card.Size = UDim2.new(1, -5, 0, cardHeight)
+                totalCanvasHeight = totalCanvasHeight + cardHeight + 5
+                
+                -- Real-time updates
+                card.ProgLbl.Text = string.format("%s / %s", NumberCommas(currentQty), NumberCommas(ing.Required))
+                card.StatusLbl.Text = isComplete and "Complete" or string.format("Missing: %s", NumberCommas(missingQty))
+                card.StatusLbl.TextColor3 = isComplete and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
+                
+                if craftRecipe then
+                    card.CraftHeader.Visible = showCrafting
+                    for j, mat in ipairs(craftRecipe) do
+                        local matLineLbl = card:FindFirstChild("MatLine_" .. j)
+                        if matLineLbl then
+                            matLineLbl.Visible = showCrafting
+                            if showCrafting then
+                                local matNeeded = missingQty * mat.Req
+                                local matOwnedTotal = inv[mat.ID] or 0
+                                
+                                local allocated = math.min(matNeeded, remainingInv[mat.ID] or 0)
+                                local matStillNeed = matNeeded - allocated
+                                remainingInv[mat.ID] = (remainingInv[mat.ID] or 0) - allocated
+                                
+                                matLineLbl.Text = string.format("%s (%s) - (%s) Still need: %s", mat.Name, NumberCommas(matNeeded), NumberCommas(matOwnedTotal), NumberCommas(matStillNeed))
+                                matLineLbl.TextColor3 = (matStillNeed == 0) and Color3.fromRGB(150, 200, 150) or Color3.fromRGB(200, 150, 150)
+                            end
+                        end
+                    end
+                end
+            end
+            contentFrame.CanvasSize = UDim2.new(0, 0, 0, totalCanvasHeight)
+        end
+    end
+end
+
+-- Live Polling loop (safely binds to the GUI's lifecycle)
+task.spawn(function()
+    while task.wait(1) do
+        if not screenGui.Parent then break end -- Stop continuous monitoring when GUI is destroyed
+        pcall(updateInventory)
+    end
+end)
+updateInventory()
