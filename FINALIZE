@@ -1,0 +1,2803 @@
+--=====================================================================
+-- TEST SIMULATOR — Build Hive v7 (forward-declaration fix)
+--=====================================================================
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local Workspace         = game:GetService("Workspace")
+local HttpService       = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then warn("[Test Simulator] no LocalPlayer"); return end
+
+if _G.__TEST_SIMULATOR_CLEANUP then pcall(_G.__TEST_SIMULATOR_CLEANUP) end
+if _G.__TEST_SIMULATOR_GUI then pcall(function() _G.__TEST_SIMULATOR_GUI:Destroy() end); _G.__TEST_SIMULATOR_GUI = nil end
+local INSTANCE_ID = HttpService:GenerateGUID(false)
+_G.__TEST_SIMULATOR_INSTANCE = INSTANCE_ID
+
+local CONFIG = {
+	HUB_NAME="Test Simulator", REFRESH_INTERVAL=1, REQUEST_COOLDOWN=0.75,
+	MAX_AMOUNT=1000000, MAX_BLENDER_COUNT=100000,
+	WINDOW_SIZE=UDim2.fromOffset(502,269), WINDOW_POSITION=UDim2.fromOffset(128,139),
+	TITLE_HEIGHT=32, STATUS_HEIGHT=20, SIDEBAR_WIDTH=108, CONTENT_GAP=8,
+	ROYAL_JELLY_AMOUNTS={1,10,100,500,1000}, TICKET_AMOUNTS={1,10,100,500},
+	DIAMOND_EGG_TICKET_COST=400, GIFTED_TYPES_TOTAL=50,
+	BUILD_TICK_INTERVAL = 0.3,
+}
+
+local function tryRequire(name, timeout)
+	local ok, mod = pcall(function()
+		local m = ReplicatedStorage:WaitForChild(name, timeout or 10)
+		if not m then return nil end
+		return require(m)
+	end)
+	if ok then return mod end
+	warn("[Test Simulator] could not require "..name); return nil
+end
+local function tryRequirePath(pathStr, timeout)
+	local parts = {}; for p in pathStr:gmatch("[^%.]+") do parts[#parts+1]=p end
+	local ok, mod = pcall(function()
+		local cur = ReplicatedStorage
+		for _, p in ipairs(parts) do cur = cur:WaitForChild(p, timeout or 5); if not cur then return nil end end
+		return require(cur)
+	end)
+	if ok then return mod end; return nil
+end
+
+local Cache          = tryRequire("ClientStatCache")
+local StatTools      = tryRequire("StatTools")
+local StatReqs       = tryRequire("StatReqs")
+local ItemPackages   = tryRequire("ItemPackages")
+local EggTypes       = tryRequire("EggTypes")
+local StatModifiers  = tryRequire("StatModifiers")
+local BlenderRecipes = tryRequire("BlenderRecipes")
+local Events         = tryRequire("Events")
+local OsTime         = tryRequire("OsTime")
+local BuffTile       = tryRequirePath("Gui.TileDisplay.BuffTile", 5)
+local Quests         = tryRequire("Quests")
+local NPCs           = tryRequire("NPCs")
+local BeeTypes       = tryRequire("BeeTypes")
+
+local function nowPlaytime()
+	local stats = Cache and Cache:Get(); if not stats then return nil end
+	local osNow = OsTime and OsTime() or os.time()
+	if not stats.LoadTime then return nil end
+	return (stats.PlaytimeAtLoad or 0) + (stats.OfflineProgressTime or 0) + (osNow - stats.LoadTime)
+end
+
+local HONEY = "Honey"
+local ITEM_TYPES = {
+	["Royal Jelly"]="RoyalJelly",["Gumdrops"]="Gumdrops",["Red Extract"]="RedExtract",
+	["Blue Extract"]="BlueExtract",["Enzymes"]="Enzymes",["Oil"]="Oil",["Glue"]="Glue",
+	["Glitter"]="Glitter",["Tickets"]="Ticket",["Strawberry"]="Strawberry",["Blueberry"]="Blueberry",
+	["Pineapple"]="Pineapple",["Sunflower Seed"]="SunflowerSeed",["Moon Charm"]="MoonCharm",
+	["Magic Bean"]="MagicBean",["Coconut"]="Coconut",["Neonberry"]="Neonberry",
+	["Honeysuckle"]="Honeysuckle",["Bitterberry"]="Bitterberry",["Whirligig"]="Whirligig",
+	["Star Jelly"]="StarJelly",["Purple Potion"]="PurplePotion",["Tropical Drink"]="TropicalDrink",
+	["Super Smoothie"]="SuperSmoothie",["Soft Wax"]="SoftWax",["Hard Wax"]="HardWax",
+	["Caustic Wax"]="CausticWax",["Swirled Wax"]="SwirledWax",["Field Dice"]="FieldDice",
+	["Smooth Dice"]="SmoothDice",["Loaded Dice"]="LoadedDice",["Turpentine"]="Turpentine",
+	["Diamond Egg"]="Diamond",["Stinger"]="Stinger",["Spirit Petal"]="SpiritPetal",
+	["Comforting Vial"]="ComfortingVial",["Refreshing Vial"]="RefreshingVial",
+	["Motivating Vial"]="MotivatingVial",["Invigorating Vial"]="InvigoratingVial",
+	["Music Bee Jelly"]="MusicBeeJelly",["Carpenter Bee Jelly"]="CarpenterBeeJelly",
+	["Baby Bee Jelly"]="BabyBeeJelly",["Diamond Bee Jelly"]="DiamondBeeJelly",
+	["Shy Bee Jelly"]="ShyBeeJelly",["Ninja Bee Jelly"]="NinjaBeeJelly",
+}
+local INVENTORY_FILTER = {
+	"Diamond Egg","Tickets","Comforting Vial","Refreshing Vial","Motivating Vial",
+	"Invigorating Vial","Coconut","Tropical Drink","Star Treat","Glue","Royal Jelly","Star Jelly",
+	"Magic Bean","Music Bee Jelly","Carpenter Bee Jelly","Baby Bee Jelly","Diamond Bee Jelly","Shy Bee Jelly","Ninja Bee Jelly",
+}
+local TYPE_TO_DISPLAY = {}; for d,t in pairs(ITEM_TYPES) do TYPE_TO_DISPLAY[t]=d end
+
+local GEARS = {
+	{ id="DiamondMask", name="Diamond Mask", aliases={"Diamond Mask"},
+	  requirements={{HONEY,5000000000},{"BlueExtract",250},{"Oil",150},{"Glitter",100},{"Diamond",5},{"ComfortingVial",1}}},
+	{ id="PetalBelt", name="Petal Belt", aliases={"Petal Belt"},
+	  requirements={{HONEY,15000000000},{"SpiritPetal",1},{"StarJelly",25},{"Glitter",50},{"Glue",100}}},
+	{ id="CrimsonGuard", name="Crimson Guard", aliases={"Crimson Guard"},
+	  requirements={{HONEY,200000000},{"RedExtract",100},{"Stinger",100},{"Oil",50},{"Glitter",25}}},
+	{ id="CobaltGuard", name="Cobalt Guard", aliases={"Cobalt Guard"},
+	  requirements={{HONEY,200000000},{"BlueExtract",100},{"Stinger",100},{"Enzymes",50},{"Glitter",25}}},
+}
+local RECIPE_TYPES = {
+	"RedExtract","BlueExtract","Glue","Enzymes","Oil","Gumdrops","MoonCharm","Glitter",
+	"StarJelly","TropicalDrink","PurplePotion","SuperSmoothie","SoftWax","HardWax",
+	"CausticWax","SwirledWax","FieldDice","SmoothDice","LoadedDice","Turpentine",
+}
+local EGGS = {
+	{key="Silver",name="Silver Egg",cost=50,typeId="Silver"},
+	{key="Gold",name="Gold Egg",cost=100,typeId="Gold"},
+	{key="Diamond",name="Diamond Egg",cost=400,typeId="Diamond"},
+	{key="StarTreat",name="Star Treat",cost=1000,typeId="StarTreat"},
+}
+local SPIRIT_BEAR_QUEST_NAMES = {
+	"Spirit's Starter","The First Offering","Rules of The Road","QR Quest","Pleasant Pastimes",
+	"Nature's Lessons","The Gifts Of Life","Out-Questing Questions","Forcefully Friendly","Sway Away",
+}
+local SPIRIT_BEAR_QUEST_DATA = {
+	["Spirit's Starter"]={number=1,requirements={"Collect 20,000,000 White Pollen.","Collect 50,000,000 Pollen from the Mountain Top Field.","Collect 10,000,000 Pollen from the Dandelion Field.","Collect 1,000,000 Goo from White Flowers.","Collect 300 Honey Tokens.","Collect 100 Sunflower Seed Tokens."}},
+	["The First Offering"]={number=2,requirements={"Collect 30,000,000 White Pollen.","Collect 30,000,000 Pollen from the Pumpkin Patch.","Collect 30,000,000 Pollen from the Clover Field.","Collect 2,000,000 Goo from Blue Flowers.","Collect 100 Blueberry Tokens.","Collect 25 Inspire Tokens.","Donate 1 Cloud Vial to the Wind Shrine."}},
+	["Rules of The Road"]={number=3,requirements={"Collect 40,000,000 White Pollen.","Collect 40,000,000 Pollen from the Pineapple Patch.","Collect 40,000,000 Pollen from the Rose Field.","Collect 3,000,000 Goo from Red Flowers.","Collect 150 Strawberry Tokens.","Collect 50 Tokens from Leaves.","Donate 100 Sunflower Seeds to the Wind Shrine."}},
+	["QR Quest"]={number=4,requirements={"Collect 50,000,000 White Pollen.","Collect 50,000,000 Pollen from the Bamboo Field.","Collect 30,000,000 Pollen from the Spider Field.","Collect 6,000,000 Goo.","Collect 5 Gumdrops Tokens.","Collect 25 Tokens from Sparkles.","Donate 150 Blueberries to the Wind Shrine."}},
+	["Pleasant Pastimes"]={number=5,requirements={"Earn 15 Ace Badges.","Collect 60,000,000 White Pollen.","Collect 80,000,000 Pollen from the Pepper Patch.","Collect 30,000,000 Pollen from the Sunflower Field.","Collect 4,000,000 Goo from White Flowers.","Collect 500 Honey Tokens.","Share 50 Jelly Bean Tokens.","Match 5 Pairs in Memory Match Games."}},
+	["Nature's Lessons"]={number=6,requirements={"Earn 1 Master Badge.","Collect 80,000,000 White Pollen.","Collect 100,000,000 Pollen from the Pine Tree Forest.","Collect 50,000,000 Pollen from the Mushroom Field.","Collect 10,000,000 Goo from Blue Flowers.","Use 1 Magic Bean.","Feed 250 Blueberries to your Bees.","Collect 25 Moon Charm Tokens.","Donate 250 Sunflower Seeds to the Wind Shrine."}},
+	["The Gifts Of Life"]={number=7,requirements={"Earn 2 Master Badges.","Collect 100,000,000 White Pollen.","Collect 120,000,000 Pollen from the Cactus Field.","Collect 80,000,000 Pollen from the Strawberry Field.","Collect 3,000,000 Goo from the Dandelion Field.","Collect 50 Inspire Tokens.","Collect 100 Tokens from Festive Gifts.","Collect 300 Treat Tokens.","Collect 10 Royal Jelly Tokens.","Donate 300 Pineapples to the Wind Shrine."}},
+	["Out-Questing Questions"]={number=8,requirements={"Earn 4 Master Badges.","Collect 120,000,000 White Pollen.","Collect 100,000,000 Pollen from the Pumpkin Patch.","Collect 80,000,000 Pollen from the Blue Flower Field.","Collect 25,000,000 Goo.","Collect 200 Pineapple Tokens.","Collect 80 Tokens from Sparkles.","Donate 5 Oils to the Wind Shrine.","Match 10 Pairs in Memory Match Games.","Play Memory Match."}},
+	["Forcefully Friendly"]={number=9,requirements={"Earn 6 Master Badges.","Collect 140,000,000 White Pollen.","Collect 160,000,000 Pollen from the Rose Field.","Collect 60,000,000 Pollen from the Pineapple Patch.","Collect 20,000,000 Pollen from the Stump Field.","Collect 15,000,000 Goo from Red Flowers.","Use 10 Field Dice.","Feed 500 Treats to your Bees.","Complete 1 Polar Bear Quest.","Collect 200 Tokens from Sprouts.","Donate 3 Blue Extracts to the Wind Shrine.","Donate 3 Red Extracts to the Wind Shrine."}},
+	["Sway Away"]={number=10,requirements={"Earn 10 Master Badges.","Collect 150,000,000 White Pollen.","Collect 150,000,000 Pollen from the Mountain Top Field.","Collect 50,000,000 Pollen from the Clover Field.","Collect 50,000,000 Pollen from the Sunflower Field.","Collect 20,000,000 Goo from White Flowers.","Collect 250 Tokens from Wild Windy Bee.","Share 100 Jelly Bean Tokens.","Donate 5 Red Extracts to the Wind Shrine.","Donate 5 Blue Extracts to the Wind Shrine."}},
+}
+local function normalizeQuestName(s)
+	if type(s) ~= "string" then return "" end
+	return (s:gsub("[^%w]",""):lower())
+end
+local SPIRIT_BEAR_QUEST_NORMALIZED, SPIRIT_BEAR_QUEST_BY_INDEX = {}, {}
+for i, name in ipairs(SPIRIT_BEAR_QUEST_NAMES) do
+	SPIRIT_BEAR_QUEST_NORMALIZED[normalizeQuestName(name)] = i
+	SPIRIT_BEAR_QUEST_BY_INDEX[i] = name
+end
+
+local Recipe = {}
+function Recipe.getInternal(d) if not BlenderRecipes then return nil end
+	if BlenderRecipes.Get(d) then return d end; return ITEM_TYPES[d] end
+function Recipe.getData(d) local k = Recipe.getInternal(d); return k and BlenderRecipes.Get(k) end
+function Recipe.display(i) if type(i) ~= "string" then return tostring(i) end; return TYPE_TO_DISPLAY[i] or i end
+local function rjCostFor(internalType, qty, depth)
+	depth = depth or 0
+	if qty <= 0 or depth > 6 then return 0 end
+	if internalType == "RoyalJelly" then return qty end
+	local recipe = BlenderRecipes and BlenderRecipes.Get(internalType)
+	if not recipe then return 0 end
+	local total = 0
+	for _, ing in ipairs(recipe.Ingredients) do total = total + rjCostFor(ing.Type, ing.Amount * qty, depth + 1) end
+	return total
+end
+
+local function new(class, props, parent)
+	local inst = Instance.new(class)
+	for k, v in pairs(props or {}) do inst[k] = v end
+	if parent then inst.Parent = parent end
+	return inst
+end
+local function corner(gui, r) return new("UICorner", {CornerRadius=UDim.new(0,r or 6)}, gui) end
+local function stroke(gui, color, thickness, transparency)
+	return new("UIStroke", {Color=color, Thickness=thickness or 1,
+		Transparency=transparency or 0, ApplyStrokeMode=Enum.ApplyStrokeMode.Border}, gui)
+end
+local function formatExact(n)
+	if type(n) ~= "number" then return "Unavailable" end
+	local s = tostring(math.floor(n)); local k
+	repeat s, k = s:gsub("^(-?%d+)(%d%d%d)", "%1,%2") until k == 0
+	return s
+end
+local function clampWindowPosition(x, y)
+	local cam = Workspace.CurrentCamera
+	local vp = cam and cam.ViewportSize or Vector2.new(1280,720)
+	return math.clamp(x,0,math.max(0,vp.X-CONFIG.WINDOW_SIZE.X.Offset)),
+	       math.clamp(y,0,math.max(0,vp.Y-CONFIG.WINDOW_SIZE.Y.Offset))
+end
+
+--=====================================================================
+-- 5. STATE
+--=====================================================================
+local State = {
+	running=true,
+	autoBuyRJ={DiamondMask=false,PetalBelt=false,CrimsonGuard=false,CobaltGuard=false},
+	autoBuyDiamondEgg=false, autoMagicBean=false, autoFieldDice=false, autoSpeedUp=false,
+	selectedRJ=1, selectedTicket=1, recipeIndex=1, recipeQty=1, blenderQty=1,
+	currentPage="Dashboard", pending={}, lastRequest={},
+	statusText="Ready.", statusKind="info", connections={},
+}
+
+-- *** FIX: forward declarations for objects assigned later in the script ***
+-- Without these, functions defined before the assignment capture a nil GLOBAL
+-- instead of the later-declared local (Lua resolves names at definition time).
+local UI
+local C
+local JellySettings
+
+local function setStatus(text, kind)
+	State.statusText = text; State.statusKind = kind or "info"
+	if UI and UI.statusLabel then
+		local map = {info=UI.COLORS.muted,good=UI.COLORS.green,warn=UI.COLORS.gold,error=UI.COLORS.red}
+		UI.statusLabel.Text = text; UI.statusLabel.TextColor3 = map[kind or "info"] or UI.COLORS.muted
+	end
+end
+local function countOnToggles()
+	local n = 0
+	for _, v in pairs(State.autoBuyRJ) do if v then n = n + 1 end end
+	if State.autoBuyDiamondEgg then n = n + 1 end
+	if State.autoMagicBean then n = n + 1 end
+	if State.autoFieldDice then n = n + 1 end
+	if State.autoSpeedUp then n = n + 1 end
+	return n
+end
+
+--=====================================================================
+-- 6. INVENTORY / HONEY / OWNERSHIP
+--=====================================================================
+local Inventory = {}
+local function rawEggCount(t)
+	local s = Cache and Cache:Get(); if not s or not s.Eggs then return nil end
+	return s.Eggs[t] or 0
+end
+function Inventory.get(d)
+	if d == HONEY then return nil end
+	return rawEggCount(ITEM_TYPES[d] or d)
+end
+function Inventory.isAvailable()
+	local s = Cache and Cache:Get(); return s ~= nil and s.Eggs ~= nil
+end
+local function getCurrentHoney()
+	local cs = LocalPlayer:FindFirstChild("CoreStats"); if not cs then return nil end
+	local h = cs:FindFirstChild("Honey"); if not h then return nil end
+	if h:IsA("ValueBase") then return h.Value end
+	local ok, a = pcall(function() return h:GetAttribute("Value") end)
+	if ok and type(a) == "number" then return a end
+	return nil
+end
+local function getGiftedTypesDiscovered()
+	if not StatTools or not Cache then return nil end
+	local s = Cache:Get(); if not s then return nil end
+	local ok, val = pcall(function() return StatTools.GetDiscoveredGiftedTypesCount(s) end)
+	if ok and type(val) == "number" then return val end
+	return nil
+end
+local Ownership = {}
+local function ownsStats(name) local s = Cache and Cache:Get()
+	return s and s.Accessories and s.Accessories[name] ~= nil end
+local function ownsBuffs(name)
+	if not StatModifiers then return false end
+	local s = Cache and Cache:Get(); if not s then return false end
+	local ok, m = pcall(function() return StatModifiers.GetModsBySource(s, name) end)
+	return ok and m and #m > 0
+end
+local function ownsIP(name)
+	if not ItemPackages then return false end
+	local s = Cache and Cache:Get(); if not s then return false end
+	local ok, r = pcall(function() return ItemPackages.PlayerHas({Category="Accessories",Type=name}, s) end)
+	return ok and r
+end
+function Ownership.owns(g)
+	for _, a in ipairs(g.aliases) do if ownsStats(a) or ownsBuffs(a) or ownsIP(a) then return true end end
+	return false
+end
+local function findGear(id) for _, g in ipairs(GEARS) do if g.id == id then return g end end end
+
+--=====================================================================
+-- 7. NETWORK
+--=====================================================================
+local Network = {}
+local function getItemPackageRemote()
+	local e = ReplicatedStorage:FindFirstChild("Events"); if not e then return nil end
+	local r = e:FindFirstChild("ItemPackageEvent")
+	if r and (r:IsA("RemoteFunction") or r:IsA("RemoteEvent")) then return r end
+	return nil
+end
+local function sendPurchase(typeId, amount)
+	if not typeId then return false, "item identifier not verified" end
+	if type(amount) ~= "number" or amount <= 0 then return false, "invalid amount" end
+	amount = math.floor(amount)
+	if amount > CONFIG.MAX_AMOUNT then return false, "amount exceeds MAX_AMOUNT" end
+	local remote = getItemPackageRemote(); if not remote then return false, "Events.ItemPackageEvent not found" end
+	local payload = {Type=typeId, Category="Eggs", Amount=amount}
+	if remote:IsA("RemoteFunction") then
+		local ok, ok2, err = pcall(function() return remote:InvokeServer("Purchase", payload) end)
+		if not ok then return false, tostring(ok2) end
+		return ok2 == true, ok2 == true and "confirmed" or tostring(err or ok2)
+	else
+		local ok, err = pcall(function() remote:FireServer("Purchase", payload) end)
+		if not ok then return false, tostring(err) end
+		return true, "sent"
+	end
+end
+function Network.purchase(key, typeId, amount)
+	local t = os.clock(); local last = State.lastRequest[key] or -math.huge
+	if t - last < CONFIG.REQUEST_COOLDOWN then
+		return false, string.format("cooldown %.2fs", CONFIG.REQUEST_COOLDOWN - (t - last))
+	end
+	if State.pending[key] then return false, "request already pending" end
+	State.lastRequest[key] = t
+	State.pending[key] = {startedAt=t, requested=amount, preCount=Inventory.get(key)}
+	local ok, msg = sendPurchase(typeId, amount)
+	if not ok then State.pending[key] = nil end
+	return ok, msg
+end
+local function resolvePending()
+	local t = os.clock()
+	for key, info in pairs(State.pending) do
+		local cur = Inventory.get(key)
+		if cur ~= nil and info.preCount ~= nil and cur > info.preCount then
+			State.pending[key] = nil
+			setStatus(string.format("%s confirmed (+%d)", key, cur - info.preCount), "good")
+		elseif t - info.startedAt > 6 then
+			State.pending[key] = nil
+			setStatus(string.format("%s unconfirmed", key), "warn")
+		end
+	end
+end
+
+--=====================================================================
+-- 8. BLENDER
+--=====================================================================
+local Blender = {}
+function Blender.getState() return Cache and Cache:Get("BlenderState") end
+function Blender.progress()
+	local state = Blender.getState(); if not state or not state.Recipe then return nil end
+	local recipe = BlenderRecipes and BlenderRecipes.Get(state.Recipe); if not recipe then return nil end
+	local nowP = nowPlaytime(); if not nowP then return nil end
+	local elapsed = nowP - (state.StartTime or nowP)
+	local total = state.Count * recipe.Time
+	local progress = math.clamp(elapsed / total, 0, 1)
+	local acpt = recipe.AutoCompletePerTicket or 1
+	local completed = math.floor(math.floor(progress * state.Count) / acpt) * acpt
+	local tickets = math.ceil((state.Count - completed) / acpt)
+	return {recipe=state.Recipe, display=Recipe.display(state.Recipe), count=state.Count,
+		remaining=math.max(0,total-elapsed), progress=progress,
+		completed=math.floor(progress*state.Count), tickets=math.max(0,tickets)}
+end
+function Blender.placeOrder(internalRecipe, count)
+	if not Events then return false, "Events module not loaded" end
+	local ok, res = pcall(function()
+		return Events.ClientCall("BlenderCommand","PlaceOrder",{Recipe=internalRecipe,Count=count})
+	end)
+	if not ok then return false, tostring(res) end
+	if not res then return false, "rejected" end
+	pcall(function() Cache:Set("BlenderState", res) end)
+	return true, "order placed"
+end
+function Blender.stopOrder()
+	if not Events then return false, "Events module not loaded" end
+	local ok, err = pcall(function() Events.ClientCall("BlenderCommand","StopOrder") end)
+	if not ok then return false, tostring(err) end
+	pcall(function() Cache:Set("BlenderState", nil) end)
+	return true, "stopped"
+end
+function Blender.speedUp()
+	if not Events then return false, "Events module not loaded" end
+	local ok, err = pcall(function() Events.ClientCall("BlenderCommand","SpeedUpOrder") end)
+	if not ok then return false, tostring(err) end
+	return true, "speed-up requested"
+end
+
+--=====================================================================
+-- 9. AUTO BUY COMPUTATION
+--=====================================================================
+local AutoBuy = {}
+function AutoBuy.computeRJForGear(gear)
+	local cur = Inventory.get("RoyalJelly") or 0; local total = 0
+	for _, req in ipairs(gear.requirements) do
+		local t, amount = req[1], req[2]
+		if t == HONEY then
+		elseif t == "RoyalJelly" then total = total + amount
+		else
+			local have = Inventory.get(t) or 0
+			local short = math.max(0, amount - have)
+			if short > 0 then total = total + rjCostFor(t, short) end
+		end
+	end
+	return math.max(0, total - cur)
+end
+function AutoBuy.computeDiamondEggMissing()
+	local dm = findGear("DiamondMask"); if not dm or Ownership.owns(dm) then return 0 end
+	return math.max(0, 5 - (Inventory.get("Diamond") or 0))
+end
+function AutoBuy.computeTotalMissingGlitter()
+	local anyActive = false; local totalReq = 0
+	for _, gear in ipairs(GEARS) do
+		if State.autoBuyRJ[gear.id] and not Ownership.owns(gear) then
+			anyActive = true
+			for _, req in ipairs(gear.requirements) do
+				if req[1] == "Glitter" then totalReq = totalReq + req[2] end
+			end
+		end
+	end
+	if not anyActive then return 0 end
+	return math.max(0, totalReq - (Inventory.get("Glitter") or 0))
+end
+function AutoBuy.computeMagicBeansToPurchase()
+	local mg = AutoBuy.computeTotalMissingGlitter(); if mg <= 0 then return 0 end
+	return math.max(0, mg - (Inventory.get("MagicBean") or 0))
+end
+function AutoBuy.compute()
+	local perGear, gearStates = {}, {}
+	for _, gear in ipairs(GEARS) do
+		local owned = Ownership.owns(gear); gearStates[gear.id] = owned
+		perGear[gear.id] = {gear=gear, owned=owned, rjMissing=owned and 0 or AutoBuy.computeRJForGear(gear)}
+	end
+	return {perGear=perGear, gearStates=gearStates, diamondMissing=AutoBuy.computeDiamondEggMissing()}
+end
+
+--=====================================================================
+-- 10. AUTO BUY LOOPS
+--=====================================================================
+local RJAuto = {lastAttemptAt=0, lastSeenCount=0, failStreak=0, pauseUntil=0}
+function RJAuto.tick()
+	local now = os.clock(); if now < RJAuto.pauseUntil then return end
+	if RJAuto.lastAttemptAt > 0 then
+		if State.pending["Royal Jelly"] then return end
+		local nc = Inventory.get("RoyalJelly") or 0
+		if nc > RJAuto.lastSeenCount then RJAuto.failStreak = 0; RJAuto.lastAttemptAt = 0
+		else
+			RJAuto.failStreak = RJAuto.failStreak + 1; RJAuto.lastAttemptAt = 0
+			if RJAuto.failStreak >= 2 then
+				RJAuto.pauseUntil = now + 30; RJAuto.failStreak = 0
+				setStatus("RJ auto-buy paused: not confirming.", "error"); return
+			end
+		end
+	end
+	local maxMissing, anyOn = 0, false
+	for _, gear in ipairs(GEARS) do
+		if State.autoBuyRJ[gear.id] and not Ownership.owns(gear) then
+			anyOn = true; local m = AutoBuy.computeRJForGear(gear)
+			if m > maxMissing then maxMissing = m end
+		end
+	end
+	if not anyOn or maxMissing <= 0 then return end
+	local cur = Inventory.get("RoyalJelly") or 0
+	local chunk = math.min(maxMissing, CONFIG.MAX_AMOUNT)
+	RJAuto.lastSeenCount = cur; RJAuto.lastAttemptAt = now
+	local ok, msg = Network.purchase("Royal Jelly", "RoyalJelly", chunk)
+	if ok then setStatus(string.format("RJ auto-buy: requesting %d", chunk), "info")
+	else
+		RJAuto.lastAttemptAt = 0; RJAuto.failStreak = RJAuto.failStreak + 1
+		if RJAuto.failStreak >= 3 then RJAuto.pauseUntil = now + 30; RJAuto.failStreak = 0 end
+		if msg and not msg:find("cooldown") and not msg:find("pending") then
+			setStatus("RJ auto-buy failed: "..tostring(msg), "error")
+		end
+	end
+end
+
+local DiamondAuto = {lastAttemptAt=0,lastSeenCount=0,lastSeenTickets=0,failStreak=0,pauseUntil=0}
+function DiamondAuto.tick()
+	if not State.autoBuyDiamondEgg then return end
+	local now = os.clock(); if now < DiamondAuto.pauseUntil then return end
+	if DiamondAuto.lastAttemptAt > 0 then
+		if State.pending["Diamond Egg"] then return end
+		local nc = Inventory.get("Diamond") or 0; local nt = Inventory.get("Ticket") or 0
+		DiamondAuto.lastAttemptAt = 0
+		if nc > DiamondAuto.lastSeenCount then DiamondAuto.failStreak = 0
+		elseif nt < DiamondAuto.lastSeenTickets then
+			DiamondAuto.pauseUntil = now + 60
+			setStatus("Diamond auto-buy paused: tickets spent, no egg.", "error"); return
+		else
+			DiamondAuto.failStreak = DiamondAuto.failStreak + 1
+			if DiamondAuto.failStreak >= 2 then
+				DiamondAuto.pauseUntil = now + 30; DiamondAuto.failStreak = 0
+				setStatus("Diamond auto-buy paused: not confirming.", "error"); return
+			end
+		end
+	end
+	local missing = AutoBuy.computeDiamondEggMissing(); if missing <= 0 then return end
+	local tickets = Inventory.get("Ticket") or 0
+	if tickets < CONFIG.DIAMOND_EGG_TICKET_COST then
+		setStatus(string.format("Diamond auto-buy: need %d tickets, have %d", CONFIG.DIAMOND_EGG_TICKET_COST, tickets), "warn"); return
+	end
+	DiamondAuto.lastSeenCount = Inventory.get("Diamond") or 0
+	DiamondAuto.lastSeenTickets = tickets; DiamondAuto.lastAttemptAt = now
+	local ok, msg = Network.purchase("Diamond Egg", "Diamond", 1)
+	if ok then setStatus("Diamond auto-buy: requesting 1", "info")
+	else
+		DiamondAuto.lastAttemptAt = 0; DiamondAuto.failStreak = DiamondAuto.failStreak + 1
+		if DiamondAuto.failStreak >= 3 then DiamondAuto.pauseUntil = now + 30; DiamondAuto.failStreak = 0 end
+		if msg and not msg:find("cooldown") and not msg:find("pending") then
+			setStatus("Diamond auto-buy failed: "..tostring(msg), "error")
+		end
+	end
+end
+
+local function getMagicBeanTicketCost()
+	if EggTypes and type(EggTypes.Get) == "function" then
+		local ok, def = pcall(function() return EggTypes.Get("MagicBean") end)
+		if ok and type(def) == "table" and type(def.TicketCost) == "number" then return def.TicketCost end
+	end
+	return 20
+end
+local MagicBeanAuto = {lastAttemptAt=0,lastSeenBeanCount=0,lastSeenTicketCount=0,failStreak=0,pauseUntil=0,VERIFY_DELAY=2}
+function MagicBeanAuto.tick()
+	local stats = Cache and Cache:Get(); if not stats then return end
+	local now = os.clock(); if now < MagicBeanAuto.pauseUntil then return end
+	if State.pending["Magic Bean"] then return end
+	if MagicBeanAuto.lastAttemptAt > 0 then
+		if now - MagicBeanAuto.lastAttemptAt < MagicBeanAuto.VERIFY_DELAY then return end
+		local nb = Inventory.get("MagicBean") or 0; local nt = Inventory.get("Ticket") or 0
+		MagicBeanAuto.lastAttemptAt = 0
+		if nb > MagicBeanAuto.lastSeenBeanCount then MagicBeanAuto.failStreak = 0
+		elseif nt < MagicBeanAuto.lastSeenTicketCount then
+			MagicBeanAuto.pauseUntil = now + 60
+			setStatus("Magic Bean auto-buy paused: tickets spent, no bean.", "error"); return
+		else
+			MagicBeanAuto.failStreak = MagicBeanAuto.failStreak + 1
+			if MagicBeanAuto.failStreak >= 2 then
+				MagicBeanAuto.pauseUntil = now + 30; MagicBeanAuto.failStreak = 0
+				setStatus("Magic Bean auto-buy paused: not confirming.", "error"); return
+			end
+		end
+	end
+	local needed = AutoBuy.computeMagicBeansToPurchase(); if needed <= 0 then return end
+	if (Inventory.get("Ticket") or 0) < getMagicBeanTicketCost() then return end
+	MagicBeanAuto.lastSeenBeanCount = Inventory.get("MagicBean") or 0
+	MagicBeanAuto.lastSeenTicketCount = Inventory.get("Ticket") or 0
+	MagicBeanAuto.lastAttemptAt = now
+	local ok, msg = Network.purchase("Magic Bean", "MagicBean", 1)
+	if ok then setStatus(string.format("Magic Bean auto-buy: 1 of %d needed", needed), "info")
+	else
+		MagicBeanAuto.lastAttemptAt = 0; MagicBeanAuto.failStreak = MagicBeanAuto.failStreak + 1
+		if MagicBeanAuto.failStreak >= 3 then MagicBeanAuto.pauseUntil = now + 30; MagicBeanAuto.failStreak = 0 end
+		if msg and not msg:find("cooldown") and not msg:find("pending") then
+			setStatus("Magic Bean auto-buy failed: "..tostring(msg), "error")
+		end
+	end
+end
+
+--=====================================================================
+-- 11. NECTAR CONDENSER
+--=====================================================================
+local Condenser = {lastFireAt=-math.huge,pendingUntil=0,lastFireNectar=0,lastFireVials=0,
+	COOLDOWN=8,VERIFY_WINDOW=6,MIN_NECTAR_SECS=43200,MAX_VIALS=10}
+local function getComfortingNectarRemainingSeconds()
+	if BuffTile and type(BuffTile.GetBuffTile) == "function" then
+		local ok, tile = pcall(function() return BuffTile.GetBuffTile("Comforting Nectar") end)
+		if ok and type(tile) == "table" then
+			local s, d = tile.TimerStart, tile.TimerDur
+			if type(s) == "number" and type(d) == "number" then
+				return math.max(0, s + d - ((OsTime and OsTime()) or os.time()))
+			end
+		end
+	end
+	if not Cache or not StatModifiers then return nil end
+	local stats = Cache:Get(); if not stats then return nil end
+	local ok, mods = pcall(function() return StatModifiers.GetModsBySource(stats, "Comforting Nectar") end)
+	if not ok or type(mods) ~= "table" or #mods == 0 then return nil end
+	local osNow = (OsTime and OsTime()) or os.time(); local best = 0
+	for _, m in ipairs(mods) do
+		if type(m) == "table" and type(m.Dur) == "number" and type(m.Start) == "number" then
+			local r = m.Dur - (osNow - m.Start); if r > best then best = r end
+		end
+	end
+	return best
+end
+local function fireCondenser()
+	local e = ReplicatedStorage:FindFirstChild("Events"); if not e then return false, "Events folder missing" end
+	local r = e:FindFirstChild("NectarCondenser"); if not r then return false, "NectarCondenser remote missing" end
+	if r:IsA("RemoteFunction") then
+		local ok, err = pcall(function() r:InvokeServer("Comforting") end)
+		if not ok then return false, tostring(err) end; return true, "invoked"
+	else
+		local ok, err = pcall(function() r:FireServer("Comforting") end)
+		if not ok then return false, tostring(err) end; return true, "fired"
+	end
+end
+local function tryAutoCondenser()
+	if not State.autoBuyRJ.DiamondMask then return end
+	if not Cache or not StatModifiers then return end
+	local t = os.clock()
+	if Condenser.pendingUntil > 0 then
+		if t < Condenser.pendingUntil then return end
+		local nv = Inventory.get("ComfortingVial") or 0; local nn = getComfortingNectarRemainingSeconds() or 0
+		local gained = nv - Condenser.lastFireVials; local spent = Condenser.lastFireNectar - nn
+		if gained >= 1 then setStatus(string.format("Condenser: +%d vial", gained), "good")
+		elseif spent >= Condenser.MIN_NECTAR_SECS - 60 then setStatus("Condenser consumed 12h nectar", "good")
+		else setStatus("Condenser fired, no change seen", "warn") end
+		Condenser.pendingUntil = 0
+	end
+	local dm = findGear("DiamondMask"); if not dm or Ownership.owns(dm) then return end
+	local vials = Inventory.get("ComfortingVial") or 0
+	if vials >= 1 or vials >= Condenser.MAX_VIALS then return end
+	local nectar = getComfortingNectarRemainingSeconds()
+	if not nectar or nectar < Condenser.MIN_NECTAR_SECS then return end
+	if t - Condenser.lastFireAt < Condenser.COOLDOWN then return end
+	Condenser.lastFireAt = t; Condenser.lastFireNectar = nectar
+	Condenser.lastFireVials = vials; Condenser.pendingUntil = t + Condenser.VERIFY_WINDOW
+	local ok, msg = fireCondenser()
+	if not ok then Condenser.pendingUntil = 0; setStatus("Condenser fire error: "..tostring(msg), "error"); return end
+	setStatus(string.format("Condenser fired (%.1fh nectar)", nectar/3600), "info")
+end
+
+--=====================================================================
+-- 11.5 QUEST AUTOMATION
+--=====================================================================
+local QuestAuto = {lastBeanAt=0,beanPending=nil,beanFailStreak=0,beanPauseUntil=0,
+	lastDiceAt=0,dicePending=nil,diceFailStreak=0,dicePauseUntil=0,
+	COOLDOWN=1,VERIFY_WINDOW=3,PAUSE_AFTER_FAIL=30}
+local questStatusLabel = nil
+local function setQuestStatus(text, kind)
+	setStatus(text, kind)
+	if questStatusLabel then
+		local map = {info=C.muted,good=C.green,warn=C.gold,error=C.red,muted=C.muted}
+		questStatusLabel.Text = text; questStatusLabel.TextColor3 = map[kind or "info"] or C.muted
+	end
+end
+local function getSpiritBearQuestData()
+	if not Quests or not Cache then return nil end
+	local stats = Cache:Get(); if not stats or not stats.Quests then return nil end
+	for _, a in ipairs(stats.Quests.Active or {}) do
+		if type(a.Name) ~= "string" then continue end
+		local qNum = SPIRIT_BEAR_QUEST_NORMALIZED[normalizeQuestName(a.Name)]
+		if qNum then
+			local canonical = SPIRIT_BEAR_QUEST_BY_INDEX[qNum]; local qDef = nil
+			local okN, defN = pcall(function() return Quests:Get(a.Name) end)
+			if okN and defN then qDef = defN end
+			if not qDef then
+				local okC, defC = pcall(function() return Quests:Get(canonical) end)
+				if okC and defC then qDef = defC end
+			end
+			if qDef and type(qDef.NPC) == "string" and qDef.NPC:lower():find("spirit",1,true) then
+				local okT, tasks = pcall(function() return Quests.ResolveTasks(qDef, stats) end)
+				if okT and type(tasks) == "table" then
+					local okP, progress = pcall(function() return Quests:GetProgression(tasks, stats, a.StartValues, a.Name) end)
+					if okP and type(progress) == "table" then return canonical, qNum, tasks, progress end
+				end
+			end
+		end
+	end
+	return nil
+end
+local function findTaskByKeyword(tasks, stats, kw)
+	for i, task in ipairs(tasks) do
+		local ok, desc = pcall(function() return Quests.GetTaskDescription(stats, task) end)
+		if ok and type(desc) == "string" and desc:lower():find(kw:lower(),1,true) then return i end
+	end
+	return nil
+end
+local function tryQuestAuto()
+	local t = os.clock()
+	if not State.autoMagicBean and not State.autoFieldDice then
+		QuestAuto.beanPending = nil; QuestAuto.dicePending = nil; return
+	end
+	if not Quests or not Events or not Cache then return end
+	local questName, qNum, tasks, progress = getSpiritBearQuestData(); local stats = Cache:Get()
+	if State.autoMagicBean then
+		if qNum ~= 6 or not questName then
+			QuestAuto.beanPending = nil; QuestAuto.beanFailStreak = 0
+			if qNum and State.autoMagicBean then
+				setQuestStatus(string.format("Bean: waiting for Quest 6 (currently %d)", qNum), "muted")
+			end
+		else
+			local idx = findTaskByKeyword(tasks, stats, "Magic Bean")
+			if idx and progress[idx] then
+				local p = progress[idx]
+				if p[1] >= 1 then
+					QuestAuto.beanPending = nil; QuestAuto.beanFailStreak = 0
+					setQuestStatus("Quest 6: Magic Bean COMPLETE ✓", "good")
+				elseif t >= QuestAuto.beanPauseUntil then
+					if QuestAuto.beanPending then
+						if t - QuestAuto.beanPending.startedAt >= QuestAuto.VERIFY_WINDOW then
+							local cur = Inventory.get("MagicBean") or 0
+							if p[1] > (QuestAuto.beanPending.preProgress or 0) or cur < (QuestAuto.beanPending.preCount or 0) then
+								QuestAuto.beanPending = nil; QuestAuto.beanFailStreak = 0
+								setQuestStatus("Quest 6: Magic Bean consumed ✓", "good")
+							else
+								QuestAuto.beanPending = nil; QuestAuto.beanFailStreak = QuestAuto.beanFailStreak + 1
+								if QuestAuto.beanFailStreak >= 2 then
+									QuestAuto.beanPauseUntil = t + QuestAuto.PAUSE_AFTER_FAIL
+									QuestAuto.beanFailStreak = 0
+									setQuestStatus("Quest 6: Magic Bean not consumed — paused 30s.", "error")
+								else setQuestStatus("Quest 6: unconfirmed — will retry.", "warn") end
+							end
+						end
+					else
+						local has = Inventory.get("MagicBean") or 0
+						if has <= 0 then setQuestStatus("Quest 6: No Magic Bean.", "warn")
+						elseif t - QuestAuto.lastBeanAt >= QuestAuto.COOLDOWN then
+							QuestAuto.lastBeanAt = t
+							QuestAuto.beanPending = {startedAt=t, preCount=has, preProgress=p[1]}
+							local ok, err = pcall(function()
+								Events.ClientCall("PlayerActivesCommand", {Name="Magic Bean"}) end)
+							if ok then setQuestStatus("Quest 6: Using Magic Bean…", "info")
+							else
+								QuestAuto.beanPending = nil
+								QuestAuto.beanFailStreak = QuestAuto.beanFailStreak + 1
+								setQuestStatus("Quest 6: FireServer failed: "..tostring(err), "error")
+							end
+						else setQuestStatus("Quest 6: cooldown…", "info") end
+					end
+				end
+			else setQuestStatus("Quest 6: requirement not found.", "warn") end
+		end
+	end
+	if State.autoFieldDice then
+		if qNum ~= 9 or not questName then
+			QuestAuto.dicePending = nil; QuestAuto.diceFailStreak = 0
+			if qNum and State.autoFieldDice then
+				setQuestStatus(string.format("Dice: waiting for Quest 9 (currently %d)", qNum), "muted")
+			end
+		else
+			local idx = findTaskByKeyword(tasks, stats, "Field Dice")
+			if idx and progress[idx] then
+				local p = progress[idx]
+				if p[1] >= 1 then
+					QuestAuto.dicePending = nil; QuestAuto.diceFailStreak = 0
+					setQuestStatus(string.format("Quest 9: Field Dice COMPLETE ✓ (%d/%d)", math.floor(p[2]), math.floor(p[3])), "good")
+				elseif t >= QuestAuto.dicePauseUntil then
+					if QuestAuto.dicePending then
+						if t - QuestAuto.dicePending.startedAt >= QuestAuto.VERIFY_WINDOW then
+							local cur = Inventory.get("FieldDice") or 0
+							if p[1] > (QuestAuto.dicePending.preProgress or 0) or cur < (QuestAuto.dicePending.preCount or 0) then
+								QuestAuto.dicePending = nil; QuestAuto.diceFailStreak = 0
+								setQuestStatus(string.format("Quest 9: Field Dice %d/%d used ✓", math.floor(p[2]), math.floor(p[3])), "info")
+							else
+								QuestAuto.dicePending = nil; QuestAuto.diceFailStreak = QuestAuto.diceFailStreak + 1
+								if QuestAuto.diceFailStreak >= 2 then
+									QuestAuto.dicePauseUntil = t + QuestAuto.PAUSE_AFTER_FAIL
+									QuestAuto.diceFailStreak = 0
+									setQuestStatus("Quest 9: Field Dice not consumed — paused 30s.", "error")
+								else setQuestStatus("Quest 9: unconfirmed — will retry.", "warn") end
+							end
+						end
+					else
+						local has = Inventory.get("FieldDice") or 0
+						if has <= 0 then setQuestStatus("Quest 9: No Field Dice.", "warn")
+						elseif t - QuestAuto.lastDiceAt >= QuestAuto.COOLDOWN then
+							QuestAuto.lastDiceAt = t
+							QuestAuto.dicePending = {startedAt=t, preCount=has, preProgress=p[1]}
+							local ok, err = pcall(function()
+								Events.ClientCall("PlayerActivesCommand", {Name="Field Dice"}) end)
+							if ok then setQuestStatus(string.format("Quest 9: Using Field Dice (%d/%d)…",
+								math.floor(p[2]), math.floor(p[3])), "info")
+							else
+								QuestAuto.dicePending = nil; QuestAuto.diceFailStreak = QuestAuto.diceFailStreak + 1
+								setQuestStatus("Quest 9: FireServer failed: "..tostring(err), "error")
+							end
+						else setQuestStatus("Quest 9: cooldown…", "info") end
+					end
+				end
+			else setQuestStatus("Quest 9: requirement not found.", "warn") end
+		end
+	end
+end
+
+local BlenderAuto = {lastAttemptAt=0, COOLDOWN=2, failStreak=0, pauseUntil=0}
+function BlenderAuto.tick()
+	if not State.autoSpeedUp then return end
+	if _G.__TEST_SIMULATOR_INSTANCE ~= INSTANCE_ID then return end
+	local t = os.clock(); if t < BlenderAuto.pauseUntil then return end
+	if t - BlenderAuto.lastAttemptAt < BlenderAuto.COOLDOWN then return end
+	local p = Blender.progress(); if not p or p.tickets <= 0 then return end
+	if (Inventory.get("Ticket") or 0) < p.tickets then return end
+	if not State.autoSpeedUp then return end
+	if _G.__TEST_SIMULATOR_INSTANCE ~= INSTANCE_ID then return end
+	BlenderAuto.lastAttemptAt = t
+	local ok = Blender.speedUp()
+	if not ok then
+		BlenderAuto.failStreak = BlenderAuto.failStreak + 1
+		if BlenderAuto.failStreak >= 3 then
+			BlenderAuto.pauseUntil = t + 30; BlenderAuto.failStreak = 0
+			setStatus("Auto Speed Up failed: paused", "error")
+		end
+	end
+end
+
+--=====================================================================
+-- 11.65 BUILD HIVE
+--=====================================================================
+local BuildHive = {
+	running = false, status = "Idle",
+	targets = {Music=4, Carpenter=7, Baby=5, Diamond=6, Shy=3, Ninja=5},
+	targetOrder = {"Music","Carpenter","Baby","Diamond","Shy","Ninja"},
+	priority = {Stubborn=1, Bubble=1, Bucko=1, Frosty=1, Bomber=1, Bumble=1},
+	priorityOrder = {"Stubborn","Bubble","Bucko","Frosty","Bomber","Bumble"},
+	lastAttemptAt=0, lastConfirmedAt=0, lastFireAt=0,
+	pendingSlot=nil, pendingStartedAt=0, pendingTargetBee=nil,
+	failStreak=0, pauseUntil=0, slotCooldowns={},
+	SCAN_INTERVAL=0.28, PENDING_INITIAL_WAIT=0.5, PENDING_MAX_WAIT=3.0,
+	FAIL_THRESHOLD=3, FAIL_PAUSE=30, SLOT_COOLDOWN=60,
+}
+
+local StageControl = {
+	currentStage = nil,
+	stageEnteredAt = 0,
+	lastRetryAt = 0,
+	RETRY_INTERVAL = 2,
+	MAX_WAIT = 5,
+}
+
+-- JellySettings is forward-declared at §5. Uses it here safely now.
+local function alignSettingForStage(stage)
+	local desired = (stage == "building")
+	local key = "RollToLegendary"
+	local now = os.clock()
+
+	if StageControl.currentStage ~= stage then
+		StageControl.currentStage = stage
+		StageControl.stageEnteredAt = now
+		StageControl.lastRetryAt = 0
+		print(string.format("[BuildHive] stage=%s (desired RollToLegendary=%s)",
+			stage, tostring(desired)))
+	end
+
+	local pv = JellySettings.pendingVerify[key]
+	if pv and (now - pv.startedAt) >= JellySettings.VERIFY_TIMEOUT + 1 then
+		JellySettings.pendingVerify[key] = nil
+		pv = nil
+	end
+	local confirmed = JellySettings.states[key]
+
+	if confirmed == desired and not pv then return true, "aligned" end
+
+	local waited = now - StageControl.stageEnteredAt
+	if waited > StageControl.MAX_WAIT then
+		print(string.format("[BuildHive] aligning gave up after %.1fs (confirmed=%s desired=%s)",
+			waited, tostring(confirmed), tostring(desired)))
+		return true, "giving up"
+	end
+
+	if pv then return false, "verifying" end
+	if StageControl.lastRetryAt > 0 and (now - StageControl.lastRetryAt) < StageControl.RETRY_INTERVAL then
+		return false, "retry cooldown"
+	end
+
+	local ok, msg = JellySettings.setValue(key, desired)
+	if ok then
+		StageControl.lastRetryAt = now
+		print(string.format("[BuildHive] sent RollToLegendary=%s (stage=%s waited %.1fs)",
+			tostring(desired), stage, waited))
+		return false, "sent"
+	end
+	if msg == "cooldown" then return false, "send cooldown" end
+	StageControl.lastRetryAt = now
+	print("[BuildHive] setValue error: " .. tostring(msg))
+	return false, "error"
+end
+
+local function getBeeRarity(beeName)
+	if not BeeTypes or not beeName then return nil end
+	local ok, def = pcall(function() return BeeTypes:Get(beeName) end)
+	if ok and type(def) == "table" then return def.Rarity end
+	return nil
+end
+
+local function scanHive()
+	local stats = Cache and Cache:Get(); if not stats or not stats.Honeycomb then return nil end
+	local cells = {}
+	for x = 1, 5 do
+		local col = stats.Honeycomb["x"..x]
+		for y = 1, 10 do
+			local cell = col and col["y"..y]
+			cells[x..","..y] = {x=x, y=y, beeType=cell and cell.Type or nil, file=cell}
+		end
+	end
+	return cells
+end
+
+local function computePriorityCounts(cells)
+	local counts = {}
+	for _, name in ipairs(BuildHive.priorityOrder) do counts[name] = 0 end
+	for _, cell in pairs(cells) do
+		if cell.beeType and counts[cell.beeType] ~= nil then
+			counts[cell.beeType] = counts[cell.beeType] + 1
+		end
+	end
+	return counts
+end
+
+local function computeTargetState(cells)
+	local counts = {}
+	for _, name in ipairs(BuildHive.targetOrder) do counts[name] = 0 end
+	for _, cell in pairs(cells) do
+		if cell.beeType and counts[cell.beeType] ~= nil then
+			counts[cell.beeType] = counts[cell.beeType] + 1
+		end
+	end
+	local state = {}
+	for _, name in ipairs(BuildHive.targetOrder) do
+		local cur, target = counts[name] or 0, BuildHive.targets[name]
+		local category, delta
+		if cur == target then category, delta = "complete", 0
+		elseif cur < target then category, delta = "missing", target - cur
+		else category, delta = "excess", cur - target end
+		state[name] = {current=cur, target=target, category=category, delta=delta}
+	end
+	return state
+end
+
+local function computeAll(cells)
+	local priorityCounts = computePriorityCounts(cells)
+	local state = computeTargetState(cells)
+	local prioritiesMet = true
+	for _, name in ipairs(BuildHive.priorityOrder) do
+		if (priorityCounts[name] or 0) < BuildHive.priority[name] then
+			prioritiesMet = false; break
+		end
+	end
+	local stage
+	if not prioritiesMet then stage = "priority"
+	else
+		local anyMissing, anyExcess = false, false
+		for _, name in ipairs(BuildHive.targetOrder) do
+			if state[name].category == "missing" then anyMissing = true end
+			if state[name].category == "excess" then anyExcess = true end
+		end
+		if anyMissing then stage = "building"
+		elseif anyExcess then stage = "cleanup"
+		else stage = "complete" end
+	end
+	return state, priorityCounts, stage
+end
+
+local function countEmpty(cells)
+	local n = 0
+	for _, cell in pairs(cells) do if not cell.beeType then n = n + 1 end end
+	return n
+end
+
+local function classifyBee(beeName, state, priorityCounts)
+	if not beeName then return "empty" end
+	local rarity = getBeeRarity(beeName)
+	if rarity == "Event" then return "event_protected" end
+	if rarity == "Mythic" then return "mythic_protected" end
+	if BuildHive.priority[beeName] then
+		local have = (priorityCounts and priorityCounts[beeName]) or 0
+		local need = BuildHive.priority[beeName]
+		if have <= need then return "priority_protected" end
+		return "priority_excess"
+	end
+	if state and state[beeName] then
+		local s = state[beeName]
+		if s.category == "excess" then return "target_excess" end
+		return "target_at_or_below"
+	end
+	if rarity == "Legendary" then return "other_legendary" end
+	if rarity == "Common" or rarity == "Rare" or rarity == "Epic" then return "base" end
+	return "unknown"
+end
+
+local function sortByXY(a, b)
+	if a.cell.x ~= b.cell.x then return a.cell.x < b.cell.x end
+	return a.cell.y < b.cell.y
+end
+
+local function isEligibleKind(kind)
+	return kind == "target_excess" or kind == "other_legendary" or kind == "base" or kind == "priority_excess"
+end
+
+local function planNextAction(cells)
+	local state, priorityCounts, stage = computeAll(cells)
+	if stage == "complete" then
+		return {action="done", stage=stage, state=state, priorityCounts=priorityCounts}
+	end
+	local now = os.clock()
+	local function ready(key)
+		local cd = BuildHive.slotCooldowns[key]; return not cd or now >= cd
+	end
+
+	for _, name in ipairs(BuildHive.targetOrder) do
+		if state[name].category == "excess" then
+			local slots = {}
+			for key, cell in pairs(cells) do
+				if cell.beeType == name then slots[#slots+1] = {key=key, cell=cell} end
+			end
+			table.sort(slots, sortByXY)
+			for i = BuildHive.targets[name] + 1, #slots do
+				if ready(slots[i].key) then
+					local underTarget = nil
+					for _, n in ipairs(BuildHive.targetOrder) do
+						if state[n].category == "missing" then underTarget = n; break end
+					end
+					return {action="reroll_excess", slot=slots[i].cell, slotKey=slots[i].key,
+						sourceBee=name, targetBee=underTarget, stage=stage,
+						state=state, priorityCounts=priorityCounts}
+				end
+			end
+		end
+	end
+
+	if stage == "cleanup" then
+		local anyExcessOnCooldown = false
+		for _, name in ipairs(BuildHive.targetOrder) do
+			if state[name].category == "excess" then
+				for key, cell in pairs(cells) do
+					if cell.beeType == name and not ready(key) then anyExcessOnCooldown = true; break end
+				end
+				if anyExcessOnCooldown then break end
+			end
+		end
+		if anyExcessOnCooldown then
+			return {action="wait", stage=stage, state=state, priorityCounts=priorityCounts,
+				reason="Waiting for excess slot cooldowns"}
+		end
+		return {action="no_eligible", stage=stage, state=state, priorityCounts=priorityCounts,
+			reason="Cleanup: no ready excess slots"}
+	end
+
+	for _, name in ipairs(BuildHive.priorityOrder) do
+		local have = priorityCounts[name] or 0
+		local need = BuildHive.priority[name]
+		if have > need then
+			local slots = {}
+			for key, cell in pairs(cells) do
+				if cell.beeType == name then slots[#slots+1] = {key=key, cell=cell} end
+			end
+			table.sort(slots, sortByXY)
+			for i = need + 1, #slots do
+				if ready(slots[i].key) then
+					return {action="reroll_priority_excess", slot=slots[i].cell,
+						slotKey=slots[i].key, sourceBee=name, stage=stage,
+						state=state, priorityCounts=priorityCounts}
+				end
+			end
+		end
+	end
+
+	local otherLegendary = {}
+	for key, cell in pairs(cells) do
+		if cell.beeType and ready(key) then
+			if classifyBee(cell.beeType, state, priorityCounts) == "other_legendary" then
+				otherLegendary[#otherLegendary+1] = {key=key, cell=cell}
+			end
+		end
+	end
+	table.sort(otherLegendary, sortByXY)
+	if #otherLegendary > 0 then
+		local targetBee = nil
+		for _, n in ipairs(BuildHive.targetOrder) do
+			if state[n].category == "missing" then targetBee = n; break end
+		end
+		local s = otherLegendary[1]
+		return {action="reroll_legendary", slot=s.cell, slotKey=s.key,
+			sourceBee=s.cell.beeType, targetBee=targetBee, stage=stage,
+			state=state, priorityCounts=priorityCounts}
+	end
+
+	local baseSlots = {}
+	for key, cell in pairs(cells) do
+		if cell.beeType and ready(key) then
+			if classifyBee(cell.beeType, state, priorityCounts) == "base" then
+				baseSlots[#baseSlots+1] = {key=key, cell=cell}
+			end
+		end
+	end
+	table.sort(baseSlots, sortByXY)
+	if #baseSlots > 0 then
+		local targetBee = nil
+		for _, n in ipairs(BuildHive.targetOrder) do
+			if state[n].category == "missing" then targetBee = n; break end
+		end
+		local s = baseSlots[1]
+		return {action="reroll_base", slot=s.cell, slotKey=s.key,
+			targetBee=targetBee, stage=stage, state=state, priorityCounts=priorityCounts}
+	end
+
+	local anyEligibleOnCooldown = false
+	for key, cell in pairs(cells) do
+		if cell.beeType then
+			local kind = classifyBee(cell.beeType, state, priorityCounts)
+			if isEligibleKind(kind) and not ready(key) then
+				anyEligibleOnCooldown = true; break
+			end
+		end
+	end
+	if anyEligibleOnCooldown then
+		return {action="wait", stage=stage, state=state, priorityCounts=priorityCounts,
+			reason="Waiting for slot cooldowns"}
+	end
+
+	return {action="no_eligible", stage=stage, state=state, priorityCounts=priorityCounts,
+		reason="No eligible slots remain"}
+end
+
+local function placeJelly(cell, jellyType)
+	if not Events then return false, "Events module not loaded", false end
+	local pcall_ok, amountLeft, success, newHoneycomb, discoveredBees, eggUses = pcall(function()
+		return Events.ClientCall("ConstructHiveCellFromEgg", cell.x, cell.y, jellyType, 1, false)
+	end)
+	if not pcall_ok then return false, "remote error: "..tostring(amountLeft), false end
+	if not success then return false, "remote rejected (success="..tostring(success)..")", false end
+	local dataComplete = true
+	pcall(function()
+		if type(amountLeft) == "number" then Cache:Set({"Eggs", jellyType}, amountLeft) else dataComplete = false end
+		if newHoneycomb then Cache:Set("Honeycomb", newHoneycomb) else dataComplete = false end
+		if discoveredBees then Cache:Set("DiscoveredBees", discoveredBees) end
+		if eggUses then Cache:Set({"Totals", "EggUses"}, eggUses) end
+	end)
+	return true, jellyType, dataComplete
+end
+
+function BuildHive.tick()
+	if not BuildHive.running then return end
+	if not Cache then BuildHive.status = "Cache unavailable"; return end
+	if _G.__TEST_SIMULATOR_INSTANCE ~= INSTANCE_ID then return end
+	local now = os.clock()
+
+	if now < BuildHive.pauseUntil then
+		BuildHive.status = string.format("Paused (%.0fs)", BuildHive.pauseUntil - now); return
+	end
+
+	if BuildHive.pendingSlot then
+		local elapsed = now - BuildHive.pendingStartedAt
+		if elapsed < BuildHive.PENDING_INITIAL_WAIT then
+			BuildHive.status = "Verifying Replacement"
+			return
+		end
+		local freshCells = scanHive(); if not freshCells then return end
+		local key = BuildHive.pendingSlot.x..","..BuildHive.pendingSlot.y
+		local newCell = freshCells[key]
+		local changed = newCell and newCell.beeType ~= BuildHive.pendingSlot.beeType
+		if changed then
+			BuildHive.failStreak = 0
+			BuildHive.pendingSlot = nil
+			BuildHive.pendingTargetBee = nil
+			BuildHive.lastConfirmedAt = now
+			print("[BuildHive] verification: hive changed OK")
+		elseif elapsed >= BuildHive.PENDING_MAX_WAIT then
+			BuildHive.failStreak = BuildHive.failStreak + 1
+			BuildHive.slotCooldowns[key] = now + BuildHive.SLOT_COOLDOWN
+			BuildHive.pendingSlot = nil
+			BuildHive.pendingTargetBee = nil
+			print("[BuildHive] verification: timeout, slot cooled down")
+			if BuildHive.failStreak >= BuildHive.FAIL_THRESHOLD then
+				BuildHive.pauseUntil = now + BuildHive.FAIL_PAUSE
+				BuildHive.failStreak = 0
+				BuildHive.status = "Paused: no hive change detected"
+			else
+				BuildHive.status = "Timeout; slot cooled down"
+			end
+		end
+		return
+	end
+
+	if now - BuildHive.lastAttemptAt < BuildHive.SCAN_INTERVAL then return end
+	BuildHive.lastAttemptAt = now
+
+	BuildHive.status = "Scanning Hive"
+	local cells = scanHive()
+	if not cells then BuildHive.status = "Cannot read hive"; return end
+
+	BuildHive.status = "Calculating Requirements"
+	local state, priorityCounts, stage = computeAll(cells)
+
+	local aligned, alignStatus = alignSettingForStage(stage)
+	if not aligned then
+		BuildHive.status = string.format("Aligning Until Legendary — %s (%.1fs)",
+			alignStatus, now - StageControl.stageEnteredAt)
+		return
+	end
+
+	BuildHive.status = "Finding Eligible Slot"
+	local plan = planNextAction(cells)
+
+	if plan.action == "done" then
+		BuildHive.running = false
+		BuildHive.status = "Build Complete"
+		print("[BuildHive] DONE: all targets met")
+		return
+	elseif plan.action == "no_eligible" then
+		BuildHive.running = false
+		BuildHive.status = "No Eligible Slots"
+		print("[BuildHive] STOP: " .. tostring(plan.reason or "no eligible"))
+		return
+	elseif plan.action == "wait" then
+		BuildHive.status = "Waiting: " .. (plan.reason or "cooldowns")
+		return
+	end
+
+	if (Inventory.get("RoyalJelly") or 0) < 1 then
+		BuildHive.running = false
+		BuildHive.status = "Out of Royal Jelly"
+		print("[BuildHive] STOP: out of Royal Jelly")
+		return
+	end
+
+	local actionMsg, targetLabel
+	if plan.action == "reroll_excess" then
+		targetLabel = plan.targetBee or plan.sourceBee
+		actionMsg = string.format("Replacing: %s @ (%d,%d)", targetLabel, plan.slot.x, plan.slot.y)
+	elseif plan.action == "reroll_priority_excess" then
+		targetLabel = plan.sourceBee
+		actionMsg = string.format("Replacing: excess %s @ (%d,%d)", targetLabel, plan.slot.x, plan.slot.y)
+	elseif plan.action == "reroll_legendary" then
+		targetLabel = plan.targetBee or plan.sourceBee
+		actionMsg = string.format("Replacing: %s @ (%d,%d)", targetLabel, plan.slot.x, plan.slot.y)
+	else
+		targetLabel = plan.targetBee or "priority bee"
+		actionMsg = string.format("Replacing: %s @ (%d,%d)", targetLabel, plan.slot.x, plan.slot.y)
+	end
+	BuildHive.status = actionMsg
+	print("[BuildHive] " .. actionMsg .. " [stage="..stage..", action="..plan.action.."]")
+
+	local ok, msg, dataComplete = placeJelly(plan.slot, "RoyalJelly")
+	BuildHive.lastFireAt = now
+	if not ok then
+		BuildHive.failStreak = BuildHive.failStreak + 1
+		BuildHive.slotCooldowns[plan.slotKey] = now + BuildHive.SLOT_COOLDOWN
+		BuildHive.status = "Remote Failed: " .. tostring(msg)
+		print("[BuildHive] fire FAILED: " .. tostring(msg))
+		if BuildHive.failStreak >= BuildHive.FAIL_THRESHOLD then
+			BuildHive.pauseUntil = now + BuildHive.FAIL_PAUSE; BuildHive.failStreak = 0
+		end
+		return
+	end
+	if dataComplete then
+		BuildHive.lastConfirmedAt = now
+		BuildHive.failStreak = 0
+		print("[BuildHive] fire OK (data complete, no wait needed)")
+		BuildHive.status = "Replacing: confirmed, continuing"
+	else
+		BuildHive.pendingSlot = plan.slot
+		BuildHive.pendingStartedAt = now
+		BuildHive.pendingTargetBee = plan.targetBee
+		BuildHive.status = "Waiting for Server"
+		print("[BuildHive] fire OK (awaiting hive verification)")
+	end
+end
+
+--=====================================================================
+-- 11.7 AUTO JELLY SETTINGS (JellySettings forward-declared at §5)
+--=====================================================================
+JellySettings = {
+	keys = {"RollToLegendary","RollToMythic","RollToGifted"},
+	labels = {RollToLegendary="Until Legendary", RollToMythic="Until Mythic", RollToGifted="Required Gifted"},
+	states = {}, lastSentAt = {}, pendingVerify = {},
+	SEND_COOLDOWN = 1, VERIFY_TIMEOUT = 4,
+}
+function JellySettings.readFromCache()
+	if not Cache then return end
+	local stats = Cache:Get(); if not stats then return end
+	local settings = stats.Settings
+	if type(settings) ~= "table" then
+		for _, key in ipairs(JellySettings.keys) do
+			if not JellySettings.pendingVerify[key] then JellySettings.states[key] = nil end
+		end
+		return
+	end
+	local now = os.clock()
+	for _, key in ipairs(JellySettings.keys) do
+		local raw = settings[key]
+		local realValue
+		if raw == true then realValue = true
+		elseif raw == false or raw == nil then realValue = false end
+		local pv = JellySettings.pendingVerify[key]
+		if pv then
+			if realValue == pv.value then
+				JellySettings.states[key] = realValue
+				JellySettings.pendingVerify[key] = nil
+			elseif (now - pv.startedAt) >= JellySettings.VERIFY_TIMEOUT then
+				JellySettings.states[key] = realValue
+				JellySettings.pendingVerify[key] = nil
+			end
+		else
+			JellySettings.states[key] = realValue
+		end
+	end
+end
+function JellySettings.setValue(key, value)
+	if not Events then return false, "Events module not loaded" end
+	if JellySettings.lastSentAt[key] and (os.clock() - JellySettings.lastSentAt[key]) < JellySettings.SEND_COOLDOWN then
+		return false, "cooldown"
+	end
+	JellySettings.lastSentAt[key] = os.clock()
+	JellySettings.pendingVerify[key] = {value=value, startedAt=os.clock()}
+	local ok, err = pcall(function() Events.ClientCall("PlayerSettingsEvent", key, value) end)
+	if not ok then
+		JellySettings.pendingVerify[key] = nil
+		return false, tostring(err)
+	end
+	return true, "sent"
+end
+function JellySettings.getDisplay(key)
+	local pv = JellySettings.pendingVerify[key]
+	if pv then return (pv.value and "ON" or "OFF"), pv.value, true end
+	local v = JellySettings.states[key]
+	if v == true then return "ON", true, false
+	elseif v == false then return "OFF", false, false
+	else return "Unknown", nil, false end
+end
+
+--=====================================================================
+-- 11.8 TOY AUTOMATION
+--=====================================================================
+local Toys = {
+	["Glue Dispenser"]={name="Glue Dispenser",lastAttemptAt=0,lastFiredAt=0,pauseUntil=0,failStreak=0,
+		lastState="unknown",lastDetail="Initializing",preFireTimes=nil,preFirePlaytimes=nil,SETTLE_SECS=10,MIN_RECHECK_SECS=3},
+	["Wealth Clock"]={name="Wealth Clock",lastAttemptAt=0,lastFiredAt=0,pauseUntil=0,failStreak=0,
+		lastState="unknown",lastDetail="Initializing",preFireTimes=nil,preFirePlaytimes=nil,SETTLE_SECS=10,MIN_RECHECK_SECS=3},
+}
+local toyModelCache = {}; local TOY_MODEL_TTL = 30
+local function findToyModel(name)
+	local toys = Workspace:FindFirstChild("Toys"); if not toys then return nil end
+	local found = nil
+	local function search(node)
+		if found then return end
+		if node:IsA("Model") and node.Name == name then found = node; return end
+		if node:IsA("Folder") or node:IsA("Model") then
+			for _, ch in ipairs(node:GetChildren()) do search(ch) end
+		end
+	end
+	search(toys); return found
+end
+local function resolveToy(name)
+	local now = os.clock(); local cached = toyModelCache[name]
+	if cached and now - cached.resolvedAt < TOY_MODEL_TTL then return cached end
+	local model = findToyModel(name); local entry = {model=model, resolvedAt=now}
+	if model then
+		entry.reqs = model:FindFirstChild("Requirements")
+		entry.cooldown = model:FindFirstChild("Cooldown")
+		entry.playtimeCooldown = model:FindFirstChild("PlaytimeCooldown")
+	end
+	toyModelCache[name] = entry; return entry
+end
+local function toyAvailability(name, stats)
+	local info = resolveToy(name); if not info.model then return "unable", "Toy model not in Workspace.Toys" end
+	if info.reqs then
+		if not StatReqs then return "unable", "StatReqs module missing" end
+		local okR, reqs = pcall(function() return require(info.reqs) end)
+		if not okR then return "unable", "Requirements module error" end
+		local okC, met = pcall(function() return StatReqs.Check(stats, reqs) end)
+		if not okC then return "unable", "StatReqs.Check failed" end
+		if not met then return "requirements", "Not eligible" end
+	end
+	if info.cooldown then
+		local dur; pcall(function() dur = info.cooldown.Value end)
+		if type(dur) == "number" and dur > 0 then
+			local lastUse = (stats.ToyTimes and stats.ToyTimes[name]) or 0
+			local osNow = math.floor((OsTime and OsTime() or os.time()))
+			local elapsed = osNow - lastUse
+			if elapsed < dur then return "cooldown", dur - elapsed end
+		end
+	end
+	if info.playtimeCooldown then
+		local dur; pcall(function() dur = info.playtimeCooldown.Value end)
+		if type(dur) == "number" and dur > 0 then
+			local lastPT = (stats.ToyPlaytimes and stats.ToyPlaytimes[name]) or 0
+			if StatTools then
+				local okP, curPT = pcall(function() return StatTools.GetTotalPlaytime(stats, true) end)
+				if okP and type(curPT) == "number" then
+					local elapsed = curPT - lastPT
+					if elapsed < dur then return "playtime_cooldown", dur - elapsed end
+				end
+			end
+		end
+	end
+	return "available", 0
+end
+local function fireToyRemote(name)
+	local e = ReplicatedStorage:FindFirstChild("Events"); if not e then return false, "Events folder missing" end
+	local r = e:FindFirstChild("ToyEvent"); if not r then return false, "ToyEvent remote missing" end
+	if r:IsA("RemoteEvent") then
+		local ok, err = pcall(function() r:FireServer(name) end)
+		if not ok then return false, tostring(err) end; return true, "sent"
+	else
+		local ok, err = pcall(function() r:InvokeServer(name) end)
+		if not ok then return false, tostring(err) end; return true, "invoked"
+	end
+end
+local function formatRemaining(secs)
+	if secs >= 3600 then return string.format("%.1fh remaining", secs/3600)
+	elseif secs >= 60 then return string.format("%dm remaining", math.floor(secs/60))
+	else return string.format("%ds remaining", math.floor(secs)) end
+end
+local function tickToys()
+	local stats = Cache and Cache:Get(); if not stats then return end
+	local t = os.clock()
+	for name, st in pairs(Toys) do
+		if not State.running then return end
+		if _G.__TEST_SIMULATOR_INSTANCE ~= INSTANCE_ID then return end
+		if st.lastFiredAt > 0 and (t - st.lastFiredAt) < st.SETTLE_SECS then
+			st.lastState = "firing"; st.lastDetail = string.format("Confirming… %.0fs", st.SETTLE_SECS - (t - st.lastFiredAt))
+			continue
+		end
+		if st.lastFiredAt > 0 then
+			local nowT = (stats.ToyTimes and stats.ToyTimes[name]) or 0
+			local nowP = (stats.ToyPlaytimes and stats.ToyPlaytimes[name]) or 0
+			if (nowT ~= st.preFireTimes) or (nowP ~= st.preFirePlaytimes) then st.failStreak = 0
+			else
+				st.failStreak = (st.failStreak or 0) + 1
+				if st.failStreak >= 1 then
+					st.pauseUntil = t + 300; st.failStreak = 0
+					setStatus(name..": fire not confirmed — pausing 5m.", "error")
+				end
+			end
+			st.lastFiredAt = 0
+		end
+		if st.pauseUntil > 0 and t < st.pauseUntil then
+			st.lastDetail = string.format("Paused (%.0fs)", st.pauseUntil - t); continue
+		end
+		if t - st.lastAttemptAt < st.MIN_RECHECK_SECS then continue end
+		st.lastAttemptAt = t
+		local kind, extra = toyAvailability(name, stats)
+		if kind == "unable" then st.lastState="unable"; st.lastDetail=tostring(extra)
+		elseif kind == "requirements" then st.lastState="requirements"; st.lastDetail="Badge/discovery requirement not met"
+		elseif kind == "cooldown" or kind == "playtime_cooldown" then
+			st.lastState = "cooldown"; st.lastDetail = formatRemaining(extra)
+		elseif kind == "available" then
+			st.lastState = "available"; st.lastDetail = "Ready"
+			if toyAvailability(name, stats) ~= "available" then continue end
+			st.preFireTimes = (stats.ToyTimes and stats.ToyTimes[name]) or 0
+			st.preFirePlaytimes = (stats.ToyPlaytimes and stats.ToyPlaytimes[name]) or 0
+			local ok, msg = fireToyRemote(name); st.lastFiredAt = t
+			if ok then st.lastState="firing"; st.lastDetail="Sent, awaiting confirmation"
+			else st.lastState="error"; st.lastDetail=tostring(msg) end
+		end
+	end
+end
+
+--=====================================================================
+-- 12. UI INITIALIZATION (C and UI forward-declared at §5)
+--=====================================================================
+C = {
+	bg=Color3.fromRGB(15,18,26), panel=Color3.fromRGB(25,30,41), panelAlt=Color3.fromRGB(32,38,52),
+	stroke=Color3.fromRGB(52,61,79), text=Color3.fromRGB(232,237,246), muted=Color3.fromRGB(148,158,178),
+	blue=Color3.fromRGB(86,148,255), green=Color3.fromRGB(66,196,128), gold=Color3.fromRGB(232,180,84),
+	purple=Color3.fromRGB(162,124,240), red=Color3.fromRGB(228,92,92),
+}
+local FONT, FONT_MED, FONT_BOLD = Enum.Font.Gotham, Enum.Font.GothamMedium, Enum.Font.GothamBold
+UI = {COLORS=C}
+
+local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+local gui = new("ScreenGui", {Name="TestSimulator", ResetOnSpawn=false, IgnoreGuiInset=true,
+	ZIndexBehavior=Enum.ZIndexBehavior.Sibling, DisplayOrder=100}, playerGui)
+_G.__TEST_SIMULATOR_GUI = gui
+local root = new("Frame", {Size=CONFIG.WINDOW_SIZE, Position=CONFIG.WINDOW_POSITION,
+	BackgroundColor3=C.bg, BorderSizePixel=0}, gui)
+corner(root, 10); stroke(root, C.stroke, 1)
+local uiScale = new("UIScale", {Scale=1}, root)
+local titleBar = new("Frame", {Size=UDim2.new(1,0,0,CONFIG.TITLE_HEIGHT), BackgroundColor3=C.panel, BorderSizePixel=0}, root)
+corner(titleBar, 10)
+new("Frame", {Size=UDim2.new(1,0,0,10), Position=UDim2.new(0,0,1,-10), BackgroundColor3=C.panel, BorderSizePixel=0}, titleBar)
+local titleDot = new("Frame", {Size=UDim2.fromOffset(8,8), Position=UDim2.fromOffset(12,12),
+	BackgroundColor3=C.blue, BorderSizePixel=0}, titleBar)
+corner(titleDot, 4)
+new("TextLabel", {Size=UDim2.new(1,-100,1,0), Position=UDim2.fromOffset(26,0), BackgroundTransparency=1,
+	Text=CONFIG.HUB_NAME, TextColor3=C.text, Font=FONT_BOLD, TextSize=12, TextXAlignment=Enum.TextXAlignment.Left}, titleBar)
+local closeBtn = new("TextButton", {Size=UDim2.fromOffset(24,20), Position=UDim2.new(1,-30,0,6),
+	BackgroundColor3=C.panelAlt, Text="×", TextColor3=C.text, Font=FONT_BOLD, TextSize=14,
+	AutoButtonColor=false, BorderSizePixel=0}, titleBar)
+corner(closeBtn, 4)
+local minBtn = new("TextButton", {Size=UDim2.fromOffset(24,20), Position=UDim2.new(1,-58,0,6),
+	BackgroundColor3=C.panelAlt, Text="–", TextColor3=C.text, Font=FONT_BOLD, TextSize=14,
+	AutoButtonColor=false, BorderSizePixel=0}, titleBar)
+corner(minBtn, 4)
+local bodyHeight = 269 - CONFIG.TITLE_HEIGHT - CONFIG.STATUS_HEIGHT
+local body = new("Frame", {Size=UDim2.new(1,0,0,bodyHeight), Position=UDim2.fromOffset(0,CONFIG.TITLE_HEIGHT),
+	BackgroundTransparency=1}, root)
+local sidebar = new("Frame", {Size=UDim2.new(0,CONFIG.SIDEBAR_WIDTH,1,0), BackgroundColor3=C.panel, BorderSizePixel=0}, body)
+corner(sidebar, 8)
+local navList = new("ScrollingFrame", {Size=UDim2.new(1,-8,1,-8), Position=UDim2.fromOffset(4,4),
+	BackgroundTransparency=1, BorderSizePixel=0, ScrollBarThickness=3, ScrollBarImageColor3=C.stroke,
+	CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y}, sidebar)
+new("UIListLayout", {Padding=UDim.new(0,2), SortOrder=Enum.SortOrder.LayoutOrder}, navList)
+local contentWidth = 502 - CONFIG.SIDEBAR_WIDTH - CONFIG.CONTENT_GAP
+local contentArea = new("Frame", {Size=UDim2.new(0,contentWidth,1,0),
+	Position=UDim2.fromOffset(CONFIG.SIDEBAR_WIDTH+CONFIG.CONTENT_GAP,0),
+	BackgroundTransparency=1, ClipsDescendants=true}, body)
+local statusBar = new("Frame", {Size=UDim2.new(1,0,0,CONFIG.STATUS_HEIGHT),
+	Position=UDim2.new(0,0,1,-CONFIG.STATUS_HEIGHT), BackgroundColor3=C.panel, BorderSizePixel=0}, root)
+corner(statusBar, 6)
+UI.statusLabel = new("TextLabel", {Size=UDim2.new(1,-16,1,0), Position=UDim2.fromOffset(8,0),
+	BackgroundTransparency=1, Text="Initializing...", TextColor3=C.muted, Font=FONT, TextSize=10,
+	TextXAlignment=Enum.TextXAlignment.Left, TextTruncate=Enum.TextTruncate.AtEnd}, statusBar)
+local loadingScreen = new("Frame", {Size=UDim2.new(1,0,1,0), BackgroundColor3=C.bg, BorderSizePixel=0, ZIndex=50}, body)
+corner(loadingScreen, 8)
+new("TextLabel", {Size=UDim2.new(1,0,0,20), Position=UDim2.fromOffset(0,70), BackgroundTransparency=1,
+	Text="Test Simulator", TextColor3=C.text, Font=FONT_BOLD, TextSize=18, ZIndex=51}, loadingScreen)
+local loadingStatus = new("TextLabel", {Size=UDim2.new(1,0,0,16), Position=UDim2.fromOffset(0,96),
+	BackgroundTransparency=1, Text="Initializing interface...", TextColor3=C.muted, Font=FONT, TextSize=12, ZIndex=51}, loadingScreen)
+local loadingBarBg = new("Frame", {Size=UDim2.fromOffset(200,4), Position=UDim2.new(0.5,-100,0,120),
+	BackgroundColor3=C.panelAlt, BorderSizePixel=0, ZIndex=51}, loadingScreen)
+corner(loadingBarBg, 2)
+local loadingBarFill = new("Frame", {Size=UDim2.new(0,0,1,0), BackgroundColor3=C.blue, BorderSizePixel=0, ZIndex=52}, loadingBarBg)
+corner(loadingBarFill, 2)
+local function setLoadingProgress(text, progress)
+	if loadingStatus then loadingStatus.Text = text end
+	if loadingBarFill and progress then
+		TweenService:Create(loadingBarFill, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {Size=UDim2.new(progress,0,1,0)}):Play()
+	end
+	task.wait(0.05)
+end
+
+--=====================================================================
+-- 13. SAVE SYSTEM
+--=====================================================================
+local SaveSystem = {}
+local SAVE_VERSION = 1
+local SAVE_FOLDER = "TestSimulator"
+local fsWrite, fsRead, fsIsFile, fsMakeFolder, fsIsFolder
+pcall(function() fsWrite = writefile end)
+pcall(function() fsRead = readfile end)
+pcall(function() fsIsFile = isfile end)
+pcall(function() fsMakeFolder = makefolder end)
+pcall(function() fsIsFolder = isfolder end)
+function SaveSystem.isSupported() return type(fsWrite) == "function" and type(fsRead) == "function" end
+function SaveSystem.getPath()
+	local u = LocalPlayer.Name; if not u or u == "" then u = "UnknownUser" end
+	return SAVE_FOLDER.."/"..u:gsub("[^%w_%-]","_")..".json"
+end
+local function ensureFolder()
+	if fsIsFolder then local ok, r = pcall(fsIsFolder, SAVE_FOLDER); if ok and r then return true end end
+	if fsMakeFolder then
+		pcall(fsMakeFolder, SAVE_FOLDER)
+		if fsIsFolder then local ok, r = pcall(fsIsFolder, SAVE_FOLDER); if ok and r then return true end end
+	end
+	return fsIsFile and true or false
+end
+local function validateAmount(v, allowed)
+	if type(v) ~= "number" then return nil end
+	for _, a in ipairs(allowed) do if a == v then return a end end
+	return nil
+end
+function SaveSystem.load()
+	if not SaveSystem.isSupported() then return nil end
+	ensureFolder(); local path = SaveSystem.getPath()
+	local okF, exists = pcall(fsIsFile or function() return false end, path)
+	if not okF or not exists then return nil end
+	local okR, content = pcall(fsRead, path)
+	if not okR or type(content) ~= "string" or #content == 0 then return nil end
+	local okD, data = pcall(function() return HttpService:JSONDecode(content) end)
+	if not okD or type(data) ~= "table" or data.version ~= SAVE_VERSION then return nil end
+	return data
+end
+function SaveSystem.save()
+	if not SaveSystem.isSupported() then return false end
+	ensureFolder()
+	local data = {version=SAVE_VERSION, savedAt=os.time(),
+		autoBuyRJ={DiamondMask=State.autoBuyRJ.DiamondMask==true, PetalBelt=State.autoBuyRJ.PetalBelt==true,
+			CrimsonGuard=State.autoBuyRJ.CrimsonGuard==true, CobaltGuard=State.autoBuyRJ.CobaltGuard==true},
+		autoBuyDiamondEgg=State.autoBuyDiamondEgg==true, autoMagicBean=State.autoMagicBean==true,
+		autoFieldDice=State.autoFieldDice==true, autoSpeedUp=State.autoSpeedUp==true,
+		selectedRJ=State.selectedRJ, selectedTicket=State.selectedTicket,
+		recipeIndex=State.recipeIndex, recipeQty=State.recipeQty, blenderQty=State.blenderQty,
+		windowPos={x=root and root.Position.X.Offset or 128, y=root and root.Position.Y.Offset or 139}}
+	local okE, encoded = pcall(function() return HttpService:JSONEncode(data) end)
+	if not okE or type(encoded) ~= "string" then return false end
+	return pcall(fsWrite, SaveSystem.getPath(), encoded) == true
+end
+function SaveSystem.applyToState(data)
+	if type(data) ~= "table" then return end
+	if type(data.autoBuyRJ) == "table" then
+		for id in pairs(State.autoBuyRJ) do
+			if type(data.autoBuyRJ[id]) == "boolean" then State.autoBuyRJ[id] = data.autoBuyRJ[id] end
+		end
+	end
+	if type(data.autoBuyDiamondEgg) == "boolean" then State.autoBuyDiamondEgg = data.autoBuyDiamondEgg end
+	if type(data.autoMagicBean) == "boolean" then State.autoMagicBean = data.autoMagicBean end
+	if type(data.autoFieldDice) == "boolean" then State.autoFieldDice = data.autoFieldDice end
+	if type(data.autoSpeedUp) == "boolean" then State.autoSpeedUp = data.autoSpeedUp end
+	local rj = validateAmount(data.selectedRJ, CONFIG.ROYAL_JELLY_AMOUNTS); if rj then State.selectedRJ = rj end
+	local tk = validateAmount(data.selectedTicket, CONFIG.TICKET_AMOUNTS); if tk then State.selectedTicket = tk end
+	if type(data.recipeIndex) == "number" and data.recipeIndex >= 1 and data.recipeIndex <= #RECIPE_TYPES then
+		State.recipeIndex = data.recipeIndex
+	end
+	if type(data.recipeQty) == "number" and data.recipeQty >= 1 then State.recipeQty = data.recipeQty end
+	if type(data.blenderQty) == "number" and data.blenderQty >= 1 then State.blenderQty = data.blenderQty end
+end
+function SaveSystem.applyWindowPos(data)
+	if type(data) ~= "table" or type(data.windowPos) ~= "table" or not root then return end
+	local x, y = tonumber(data.windowPos.x), tonumber(data.windowPos.y)
+	if x and y and x == x and y == y then
+		x, y = clampWindowPosition(x, y); root.Position = UDim2.fromOffset(math.floor(x), math.floor(y))
+	end
+end
+local saveDebounceToken = 0; local uiReady = false
+local function requestSave()
+	if not uiReady then return end
+	saveDebounceToken = saveDebounceToken + 1; local token = saveDebounceToken
+	task.delay(0.5, function() if token == saveDebounceToken then SaveSystem.save() end end)
+end
+local loadedCfg = nil
+pcall(function() loadedCfg = SaveSystem.load() end)
+if loadedCfg then pcall(function() SaveSystem.applyToState(loadedCfg) end) end
+
+--=====================================================================
+-- 14. WIDGET MAKERS
+--=====================================================================
+local function makePage(name)
+	local page = new("ScrollingFrame", {Name=name, Size=UDim2.fromScale(1,1),
+		BackgroundTransparency=1, BorderSizePixel=0, ScrollBarThickness=4,
+		ScrollBarImageColor3=C.stroke, ScrollingDirection=Enum.ScrollingDirection.Y,
+		ScrollingEnabled=true, ClipsDescendants=true, CanvasSize=UDim2.new(0,0,0,0),
+		AutomaticCanvasSize=Enum.AutomaticSize.Y, Visible=false}, contentArea)
+	new("UIPadding", {PaddingTop=UDim.new(0,4), PaddingBottom=UDim.new(0,10),
+		PaddingLeft=UDim.new(0,2), PaddingRight=UDim.new(0,12)}, page)
+	new("UIListLayout", {Padding=UDim.new(0,6), SortOrder=Enum.SortOrder.LayoutOrder}, page)
+	return page
+end
+local function makeSection(parent, title, height, order)
+	local f = new("Frame", {Size=UDim2.new(1,0,0,height or 90), BackgroundColor3=C.panel,
+		BorderSizePixel=0, LayoutOrder=order or 0}, parent)
+	corner(f, 8); stroke(f, C.stroke, 1)
+	if title then
+		new("TextLabel", {Size=UDim2.new(1,-16,0,14), Position=UDim2.fromOffset(8,6),
+			BackgroundTransparency=1, Text=title, TextColor3=C.text, Font=FONT_MED, TextSize=10,
+			TextXAlignment=Enum.TextXAlignment.Left}, f)
+	end
+	return f
+end
+local function makeButton(parent, text, size, color, textColor)
+	local b = new("TextButton", {Size=size or UDim2.fromOffset(60,22),
+		BackgroundColor3=color or C.panelAlt, Text=text, TextColor3=textColor or C.text,
+		Font=FONT_MED, TextSize=10, AutoButtonColor=false, BorderSizePixel=0}, parent)
+	corner(b, 5); stroke(b, C.stroke, 1); return b
+end
+local function statCard(parent, label, accent, order)
+	local card = new("Frame", {Size=UDim2.new(1,-4,0,50), BackgroundColor3=C.panel,
+		BorderSizePixel=0, LayoutOrder=order or 0}, parent)
+	corner(card, 8); stroke(card, C.stroke, 1)
+	new("Frame", {Size=UDim2.new(0,3,0,26), Position=UDim2.fromOffset(0,12),
+		BackgroundColor3=accent, BorderSizePixel=0}, card)
+	new("TextLabel", {Size=UDim2.new(1,-16,0,12), Position=UDim2.fromOffset(10,6),
+		BackgroundTransparency=1, Text=label, TextColor3=C.muted, Font=FONT, TextSize=9,
+		TextXAlignment=Enum.TextXAlignment.Left}, card)
+	return new("TextLabel", {Size=UDim2.new(1,-16,0,20), Position=UDim2.fromOffset(10,20),
+		BackgroundTransparency=1, Text="Unavailable", TextColor3=C.text, Font=FONT_BOLD,
+		TextSize=14, TextXAlignment=Enum.TextXAlignment.Left, TextTruncate=Enum.TextTruncate.AtEnd}, card)
+end
+local function toyCard(parent, label, accent, order)
+	local card = new("Frame", {Size=UDim2.new(1,-4,0,50), BackgroundColor3=C.panel,
+		BorderSizePixel=0, LayoutOrder=order or 0}, parent)
+	corner(card, 8); stroke(card, C.stroke, 1)
+	new("Frame", {Size=UDim2.new(0,3,0,26), Position=UDim2.fromOffset(0,12),
+		BackgroundColor3=accent, BorderSizePixel=0}, card)
+	new("TextLabel", {Size=UDim2.new(1,-16,0,12), Position=UDim2.fromOffset(10,5),
+		BackgroundTransparency=1, Text=label, TextColor3=C.muted, Font=FONT, TextSize=9,
+		TextXAlignment=Enum.TextXAlignment.Left}, card)
+	local s = new("TextLabel", {Size=UDim2.new(1,-16,0,16), Position=UDim2.fromOffset(10,17),
+		BackgroundTransparency=1, Text="Checking…", TextColor3=C.text, Font=FONT_BOLD,
+		TextSize=11, TextXAlignment=Enum.TextXAlignment.Left, TextTruncate=Enum.TextTruncate.AtEnd}, card)
+	local d = new("TextLabel", {Size=UDim2.new(1,-16,0,12), Position=UDim2.fromOffset(10,32),
+		BackgroundTransparency=1, Text="—", TextColor3=C.muted, Font=FONT, TextSize=8,
+		TextXAlignment=Enum.TextXAlignment.Left, TextTruncate=Enum.TextTruncate.AtEnd}, card)
+	return s, d
+end
+
+--=====================================================================
+-- 15. PAGE BUILDERS
+--=====================================================================
+local Pages = {}
+local NavButtons = {}
+
+local function buildDashboard()
+	local page = makePage("Dashboard")
+	local grid = new("Frame", {Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
+		BackgroundTransparency=1, LayoutOrder=1}, page)
+	new("UIGridLayout", {CellSize=UDim2.new(1/3,-5,0,50), CellPadding=UDim2.fromOffset(6,6),
+		SortOrder=Enum.SortOrder.LayoutOrder}, grid)
+	local honeyVal = statCard(grid, "CURRENT HONEY", C.gold, 1)
+	local ticketVal = statCard(grid, "TICKETS", C.blue, 2)
+	local beeVal = statCard(grid, "BEE COUNT", C.green, 3)
+	local hiveVal = statCard(grid, "HIVE", C.purple, 4)
+	local giftedVal = statCard(grid, "GIFTED TYPES", C.gold, 5)
+	local glueStateLbl, glueDetailLbl = toyCard(grid, "GLUE DISPENSER", C.purple, 6)
+	local wealthStateLbl, wealthDetailLbl = toyCard(grid, "WEALTH CLOCK", C.gold, 7)
+	local function applyToyLabels(st, sLbl, dLbl)
+		local kind = st.lastState or "unknown"
+		local tMap = {available="Available",cooldown="On Cooldown",requirements="Not Available",
+			unable="Unable to Verify",firing="Confirming…",error="Error",unknown="Checking…"}
+		local cMap = {available=C.green,cooldown=C.gold,requirements=C.muted,
+			unable=C.red,firing=C.blue,error=C.red,unknown=C.muted}
+		sLbl.Text = tMap[kind] or "Checking…"; sLbl.TextColor3 = cMap[kind] or C.muted
+		dLbl.Text = st.lastDetail or "—"
+	end
+	local sys = makeSection(page, "SYSTEM STATUS", 78, 2)
+	local invLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,14), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, Text="Inventory: loading…", TextColor3=C.muted, Font=FONT,
+		TextSize=10, TextXAlignment=Enum.TextXAlignment.Left, TextTruncate=Enum.TextTruncate.AtEnd}, sys)
+	local autoLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,14), Position=UDim2.fromOffset(8,40),
+		BackgroundTransparency=1, Text="Auto Buy: 0/8 ON", TextColor3=C.muted, Font=FONT,
+		TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, sys)
+	local condLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,14), Position=UDim2.fromOffset(8,56),
+		BackgroundTransparency=1, Text="Condenser: idle", TextColor3=C.muted, Font=FONT,
+		TextSize=10, TextXAlignment=Enum.TextXAlignment.Left, TextTruncate=Enum.TextTruncate.AtEnd}, sys)
+	local giftSec = makeSection(page, "GIFTED BEE DISCOVERY", 196, 3)
+	local discCountLbl = new("TextLabel", {Size=UDim2.new(0.5,-12,0,16), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, Text="Discovered: Loading...", TextColor3=C.green, Font=FONT_BOLD,
+		TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, giftSec)
+	local undiscCountLbl = new("TextLabel", {Size=UDim2.new(0.5,-12,0,16), Position=UDim2.new(0.5,4,0,24),
+		BackgroundTransparency=1, Text="Undiscovered: Loading...", TextColor3=C.gold,
+		Font=FONT_BOLD, TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, giftSec)
+	local listWrap = new("Frame", {Size=UDim2.new(1,-16,0,140), Position=UDim2.fromOffset(8,44),
+		BackgroundColor3=C.panelAlt, BorderSizePixel=0}, giftSec)
+	corner(listWrap, 5); stroke(listWrap, C.stroke, 1)
+	local discList = new("ScrollingFrame", {Size=UDim2.new(0.5,-3,1,-8), Position=UDim2.fromOffset(4,4),
+		BackgroundTransparency=1, BorderSizePixel=0, ScrollBarThickness=2, ScrollBarImageColor3=C.stroke,
+		CanvasSize=UDim2.new(1,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y}, listWrap)
+	new("UIListLayout", {Padding=UDim.new(0,1), SortOrder=Enum.SortOrder.LayoutOrder}, discList)
+	local undiscList = new("ScrollingFrame", {Size=UDim2.new(0.5,-5,1,-8), Position=UDim2.new(0.5,1,0,4),
+		BackgroundTransparency=1, BorderSizePixel=0, ScrollBarThickness=2, ScrollBarImageColor3=C.stroke,
+		CanvasSize=UDim2.new(1,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y}, listWrap)
+	new("UIListLayout", {Padding=UDim.new(0,1), SortOrder=Enum.SortOrder.LayoutOrder}, undiscList)
+	local lastDiscHash, lastUndiscHash = nil, nil
+	Pages.Dashboard = {frame=page, update=function()
+		local h = getCurrentHoney()
+		honeyVal.Text = h and formatExact(h) or "Unavailable"
+		honeyVal.TextColor3 = h and C.text or C.muted
+		local tickets = Inventory.get("Ticket")
+		ticketVal.Text = tickets and formatExact(tickets) or "Unavailable"
+		ticketVal.TextColor3 = tickets and C.text or C.muted
+		local beeCount
+		if StatTools and Cache and Cache:Get() then pcall(function() beeCount = StatTools.CountBees(Cache:Get()) end) end
+		beeVal.Text = beeCount and formatExact(beeCount) or "Unavailable"
+		hiveVal.Text = beeCount and (formatExact(beeCount).." / 50") or "5 × 10"
+		local gifted = getGiftedTypesDiscovered()
+		if gifted then
+			giftedVal.Text = string.format("%s / %d", formatExact(gifted), CONFIG.GIFTED_TYPES_TOTAL)
+			giftedVal.TextColor3 = (gifted >= CONFIG.GIFTED_TYPES_TOTAL) and C.green or C.text
+		else giftedVal.Text = "Unavailable"; giftedVal.TextColor3 = C.muted end
+		applyToyLabels(Toys["Glue Dispenser"], glueStateLbl, glueDetailLbl)
+		applyToyLabels(Toys["Wealth Clock"], wealthStateLbl, wealthDetailLbl)
+		invLbl.Text = Inventory.isAvailable() and "Inventory: connected" or "Inventory: unavailable"
+		invLbl.TextColor3 = Inventory.isAvailable() and C.green or C.gold
+		local n = countOnToggles()
+		autoLbl.Text = string.format("Auto Buy: %d/8 ON", n)
+		autoLbl.TextColor3 = n > 0 and C.green or C.muted
+		local dm = findGear("DiamondMask"); local dmOwned = dm and Ownership.owns(dm) or false
+		local nectar = getComfortingNectarRemainingSeconds()
+		if State.autoBuyRJ.DiamondMask and not dmOwned
+			and (Inventory.get("ComfortingVial") or 0) < 1
+			and nectar and nectar >= Condenser.MIN_NECTAR_SECS then
+			condLbl.Text = string.format("Condenser armed: %.1fh nectar", nectar/3600); condLbl.TextColor3 = C.gold
+		else condLbl.Text = "Condenser: idle"; condLbl.TextColor3 = C.muted end
+		if BeeTypes and Cache then
+			local stats = Cache:Get()
+			if stats and type(stats.DiscGiftTypes) == "table" then
+				local discoveredSet = {}
+				for _, id in ipairs(stats.DiscGiftTypes) do
+					local ok, def = pcall(function() return BeeTypes:GetByID(id) end)
+					if ok and type(def) == "table" and type(def.Name) == "string" then discoveredSet[def.Name] = true end
+				end
+				local allSorted = {}
+				local okA, list = pcall(function() return BeeTypes:GetSorted() end)
+				if okA and type(list) == "table" then allSorted = list end
+				if #allSorted > 0 then
+					local discArr, undiscArr = {}, {}
+					for _, beeName in ipairs(allSorted) do
+						if discoveredSet[beeName] then table.insert(discArr, beeName)
+						else table.insert(undiscArr, beeName) end
+					end
+					discCountLbl.Text = string.format("Discovered: %d / %d", #discArr, #allSorted)
+					discCountLbl.TextColor3 = C.green
+					undiscCountLbl.Text = string.format("Undiscovered: %d", #undiscArr)
+					undiscCountLbl.TextColor3 = #undiscArr > 0 and C.gold or C.green
+					local dHash = table.concat(discArr, ",")
+					if dHash ~= lastDiscHash then
+						lastDiscHash = dHash
+						for _, ch in ipairs(discList:GetChildren()) do if ch:IsA("TextLabel") then ch:Destroy() end end
+						for i, beeName in ipairs(discArr) do
+							new("TextLabel", {Size=UDim2.new(1,-4,0,12), BackgroundTransparency=1,
+								Text="• "..beeName, TextColor3=C.green, Font=FONT, TextSize=9,
+								TextXAlignment=Enum.TextXAlignment.Left, TextTruncate=Enum.TextTruncate.AtEnd,
+								LayoutOrder=i}, discList)
+						end
+					end
+					local uHash = table.concat(undiscArr, ",")
+					if uHash ~= lastUndiscHash then
+						lastUndiscHash = uHash
+						for _, ch in ipairs(undiscList:GetChildren()) do if ch:IsA("TextLabel") then ch:Destroy() end end
+						if #undiscArr == 0 then
+							new("TextLabel", {Size=UDim2.new(1,-4,0,12), BackgroundTransparency=1,
+								Text="✓ All discovered!", TextColor3=C.green, Font=FONT_BOLD,
+								TextSize=9, TextXAlignment=Enum.TextXAlignment.Left}, undiscList)
+						else
+							for i, beeName in ipairs(undiscArr) do
+								new("TextLabel", {Size=UDim2.new(1,-4,0,12), BackgroundTransparency=1,
+									Text="• "..beeName, TextColor3=C.text, Font=FONT, TextSize=9,
+									TextXAlignment=Enum.TextXAlignment.Left, TextTruncate=Enum.TextTruncate.AtEnd,
+									LayoutOrder=i}, undiscList)
+							end
+						end
+					end
+				end
+			end
+		end
+	end}
+end
+
+local function buildRoyalJelly()
+	local page = makePage("RoyalJelly")
+	local sec = makeSection(page, "ROYAL JELLY", 158, 1)
+	local curLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,16), Position=UDim2.fromOffset(8,26),
+		BackgroundTransparency=1, Text="In inventory: Unavailable", TextColor3=C.text, Font=FONT,
+		TextSize=11, TextXAlignment=Enum.TextXAlignment.Left}, sec)
+	local row = new("Frame", {Size=UDim2.new(1,-16,0,24), Position=UDim2.fromOffset(8,46), BackgroundTransparency=1}, sec)
+	new("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal, Padding=UDim.new(0,4)}, row)
+	local amountBtns = {}
+	for i, amt in ipairs(CONFIG.ROYAL_JELLY_AMOUNTS) do
+		local b = makeButton(row, formatExact(amt), UDim2.fromOffset(50,22), C.panelAlt)
+		b.LayoutOrder = i; amountBtns[amt] = b
+		b.MouseButton1Click:Connect(function()
+			State.selectedRJ = amt
+			for a, bb in pairs(amountBtns) do bb.BackgroundColor3 = (a==amt) and C.blue or C.panelAlt end
+			requestSave()
+		end)
+	end
+	local buy = makeButton(sec, "Purchase Royal Jelly", UDim2.fromOffset(140,24), C.blue, Color3.new(1,1,1))
+	buy.Position = UDim2.fromOffset(8,78)
+	buy.MouseButton1Click:Connect(function()
+		if State.selectedRJ > CONFIG.MAX_AMOUNT then setStatus("Amount exceeds MAX_AMOUNT.", "error"); return end
+		local ok, msg = Network.purchase("Royal Jelly", "RoyalJelly", State.selectedRJ)
+		setStatus(ok and string.format("RJ: requesting %d", State.selectedRJ) or ("RJ failed: "..tostring(msg)),
+			ok and "info" or "error")
+	end)
+	Pages.RoyalJelly = {frame=page, update=function()
+		local qty = Inventory.get("RoyalJelly")
+		curLbl.Text = "In inventory: "..(qty and formatExact(qty) or "Unavailable")
+		curLbl.TextColor3 = qty and C.text or C.muted
+		for a, bb in pairs(amountBtns) do bb.BackgroundColor3 = (a==State.selectedRJ) and C.blue or C.panelAlt end
+	end}
+end
+
+local function buildEggs()
+	local page = makePage("Eggs")
+	local sec = makeSection(page, "EGGS (TICKETS)", 40 + #EGGS*30, 1)
+	local rows = {}
+	for i, egg in ipairs(EGGS) do
+		local y = 24 + (i-1)*30
+		local rf = new("Frame", {Size=UDim2.new(1,-16,0,26), Position=UDim2.fromOffset(8,y),
+			BackgroundColor3=C.panelAlt, BorderSizePixel=0}, sec)
+		corner(rf, 6)
+		new("TextLabel", {Size=UDim2.fromOffset(110,26), Position=UDim2.fromOffset(8,0),
+			BackgroundTransparency=1, Text=egg.name, TextColor3=C.text, Font=FONT_MED,
+			TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, rf)
+		new("TextLabel", {Size=UDim2.fromOffset(90,26), Position=UDim2.fromOffset(120,0),
+			BackgroundTransparency=1, Text=formatExact(egg.cost).." tkts", TextColor3=C.muted, Font=FONT,
+			TextSize=9, TextXAlignment=Enum.TextXAlignment.Left}, rf)
+		local qtyLbl = new("TextLabel", {Size=UDim2.fromOffset(80,26), Position=UDim2.fromOffset(210,0),
+			BackgroundTransparency=1, Text="—", TextColor3=C.muted, Font=FONT, TextSize=9,
+			TextXAlignment=Enum.TextXAlignment.Left}, rf)
+		local b = makeButton(rf, "Buy", UDim2.new(0,50,0,20), C.blue, Color3.new(1,1,1))
+		b.Position = UDim2.new(1,-58,0,3)
+		b.MouseButton1Click:Connect(function()
+			local ok, msg = Network.purchase(egg.name, egg.typeId, 1)
+			setStatus(ok and (egg.name..": requesting 1") or (egg.name.." failed: "..tostring(msg)),
+				ok and "info" or "error")
+		end)
+		rows[egg.key] = {qty=qtyLbl}
+	end
+	Pages.Eggs = {frame=page, update=function()
+		for _, egg in ipairs(EGGS) do
+			local e = rows[egg.key]; local qty = Inventory.get(egg.typeId)
+			e.qty.Text = qty and ("x"..formatExact(qty)) or "Unavailable"
+			e.qty.TextColor3 = qty and C.text or C.muted
+		end
+	end}
+end
+
+local function buildBlender()
+	local page = makePage("Blender")
+	local sel = makeSection(page, "RECIPE SELECTION", 78, 1)
+	local nameLbl = new("TextLabel", {Size=UDim2.new(0,180,0,22), Position=UDim2.fromOffset(8,26),
+		BackgroundColor3=C.panelAlt, Text="—", TextColor3=C.text, Font=FONT_MED, TextSize=11, BorderSizePixel=0}, sel)
+	corner(nameLbl, 5)
+	local prev = makeButton(sel, "◀", UDim2.fromOffset(28,22), C.panelAlt); prev.Position = UDim2.fromOffset(194,26)
+	local next = makeButton(sel, "▶", UDim2.fromOffset(28,22), C.panelAlt); next.Position = UDim2.fromOffset(226,26)
+	local qsec = makeSection(page, "QUANTITY & ORDER", 70, 2)
+	local qtyBox = new("TextBox", {Size=UDim2.fromOffset(80,22), Position=UDim2.fromOffset(8,26),
+		BackgroundColor3=C.panelAlt, Text=tostring(State.blenderQty), TextColor3=C.text, Font=FONT_MED,
+		TextSize=11, BorderSizePixel=0, ClearTextOnFocus=false, TextXAlignment=Enum.TextXAlignment.Center}, qsec)
+	corner(qtyBox, 5); stroke(qtyBox, C.stroke, 1)
+	local minus = makeButton(qsec, "–", UDim2.fromOffset(24,22), C.panelAlt); minus.Position = UDim2.fromOffset(94,26)
+	local plus = makeButton(qsec, "+", UDim2.fromOffset(24,22), C.panelAlt); plus.Position = UDim2.fromOffset(122,26)
+	local place = makeButton(qsec, "Place Order", UDim2.fromOffset(110,22), C.blue, Color3.new(1,1,1))
+	place.Position = UDim2.fromOffset(160,26)
+	local reqSec = makeSection(page, "INGREDIENTS", 0, 3)
+	reqSec.AutomaticSize = Enum.AutomaticSize.Y
+	new("UIPadding", {PaddingBottom=UDim.new(0,6)}, reqSec)
+	local reqList = new("Frame", {Size=UDim2.new(1,-16,0,0), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, AutomaticSize=Enum.AutomaticSize.Y}, reqSec)
+	new("UIListLayout", {Padding=UDim.new(0,2)}, reqList)
+	local stSec = makeSection(page, "STATUS", 150, 4)
+	local stLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,16), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, Text="No active crafting.", TextColor3=C.muted, Font=FONT,
+		TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, stSec)
+	local costLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,16), Position=UDim2.fromOffset(8,42),
+		BackgroundTransparency=1, Text="Speed-up: —", TextColor3=C.muted, Font=FONT,
+		TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, stSec)
+	local endBtn = makeButton(stSec, "End Crafting", UDim2.fromOffset(90,22), C.panelAlt); endBtn.Position = UDim2.fromOffset(8,68)
+	local speedBtn = makeButton(stSec, "Speed Up", UDim2.fromOffset(80,22), C.panelAlt); speedBtn.Position = UDim2.fromOffset(104,68)
+	local speedAutoBtn = makeButton(stSec, "Auto Speed Up: OFF", UDim2.fromOffset(110,22), C.panelAlt)
+	speedAutoBtn.Position = UDim2.fromOffset(190,68)
+	local function refreshRecipe()
+		local internal = RECIPE_TYPES[State.recipeIndex]
+		nameLbl.Text = Recipe.display(internal)
+		if not qtyBox:IsFocused() then qtyBox.Text = tostring(State.blenderQty) end
+		local recipe = BlenderRecipes and BlenderRecipes.Get(internal)
+		for _, ch in ipairs(reqList:GetChildren()) do if ch:IsA("TextLabel") then ch:Destroy() end end
+		if not recipe then return end
+		for _, ing in ipairs(recipe.Ingredients) do
+			local have = Inventory.get(ing.Type); local need = ing.Amount * State.blenderQty
+			new("TextLabel", {Size=UDim2.new(1,0,0,14), BackgroundTransparency=1,
+				Text=string.format("%s — %s (have %s)", Recipe.display(ing.Type), formatExact(need),
+					have and formatExact(have) or "?"),
+				TextColor3=(have and have >= need) and C.green or C.text,
+				Font=FONT, TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, reqList)
+		end
+	end
+	prev.MouseButton1Click:Connect(function() State.recipeIndex = ((State.recipeIndex - 2) % #RECIPE_TYPES) + 1; refreshRecipe(); requestSave() end)
+	next.MouseButton1Click:Connect(function() State.recipeIndex = (State.recipeIndex % #RECIPE_TYPES) + 1; refreshRecipe(); requestSave() end)
+	minus.MouseButton1Click:Connect(function() State.blenderQty = math.max(1, State.blenderQty - 1); qtyBox.Text = tostring(State.blenderQty); refreshRecipe(); requestSave() end)
+	plus.MouseButton1Click:Connect(function() State.blenderQty = math.min(CONFIG.MAX_BLENDER_COUNT, State.blenderQty + 1); qtyBox.Text = tostring(State.blenderQty); refreshRecipe(); requestSave() end)
+	qtyBox.FocusLost:Connect(function()
+		local num = tonumber(qtyBox.Text)
+		if num and num >= 1 and num == math.floor(num) then
+			num = math.min(num, CONFIG.MAX_BLENDER_COUNT)
+			State.blenderQty = num; qtyBox.Text = tostring(num); refreshRecipe(); requestSave()
+		else qtyBox.Text = tostring(State.blenderQty) end
+	end)
+	place.MouseButton1Click:Connect(function()
+		local internal = RECIPE_TYPES[State.recipeIndex]
+		if not BlenderRecipes or not BlenderRecipes.Get(internal) then setStatus("BlenderRecipes not available.", "warn"); return end
+		local ok, msg = Blender.placeOrder(internal, State.blenderQty)
+		setStatus(ok and "Order placed." or ("Order failed: "..tostring(msg)), ok and "good" or "error")
+	end)
+	endBtn.MouseButton1Click:Connect(function()
+		local ok, msg = Blender.stopOrder()
+		setStatus(ok and "Stopped." or ("Stop failed: "..tostring(msg)), ok and "good" or "error")
+	end)
+	speedBtn.MouseButton1Click:Connect(function()
+		local ok, msg = Blender.speedUp()
+		setStatus(ok and "Speed-up requested." or ("Speed-up failed: "..tostring(msg)), ok and "good" or "error")
+	end)
+	speedAutoBtn.MouseButton1Click:Connect(function()
+		State.autoSpeedUp = not State.autoSpeedUp
+		if not State.autoSpeedUp then
+			BlenderAuto.lastAttemptAt = 0; BlenderAuto.failStreak = 0; BlenderAuto.pauseUntil = 0
+			setStatus("Auto Speed Up disabled.", "info")
+		else setStatus("Auto Speed Up enabled.", "good") end
+		speedAutoBtn.Text = State.autoSpeedUp and "Auto Speed Up: ON" or "Auto Speed Up: OFF"
+		speedAutoBtn.BackgroundColor3 = State.autoSpeedUp and C.green or C.panelAlt
+		requestSave()
+	end)
+	speedAutoBtn.Text = State.autoSpeedUp and "Auto Speed Up: ON" or "Auto Speed Up: OFF"
+	speedAutoBtn.BackgroundColor3 = State.autoSpeedUp and C.green or C.panelAlt
+	refreshRecipe()
+	Pages.Blender = {frame=page, update=function()
+		local p = Blender.progress()
+		if p then
+			stLbl.Text = string.format("%s %d/%d • %ds left", p.display, p.completed, p.count, math.floor(p.remaining))
+			stLbl.TextColor3 = C.gold
+			costLbl.Text = string.format("Speed-up: %d Ticket%s", p.tickets, p.tickets == 1 and "" or "s")
+			speedBtn.Visible = p.tickets > 0
+		else
+			stLbl.Text = "No active crafting."; stLbl.TextColor3 = C.muted
+			costLbl.Text = "Speed-up: —"; speedBtn.Visible = false
+		end
+		refreshRecipe()
+	end}
+end
+
+local function buildTickets()
+	local page = makePage("Tickets")
+	local sec = makeSection(page, "TICKETS", 158, 1)
+	local cur = new("TextLabel", {Size=UDim2.new(1,-16,0,16), Position=UDim2.fromOffset(8,26),
+		BackgroundTransparency=1, Text="In inventory: Unavailable", TextColor3=C.text, Font=FONT,
+		TextSize=11, TextXAlignment=Enum.TextXAlignment.Left}, sec)
+	local row = new("Frame", {Size=UDim2.new(1,-16,0,24), Position=UDim2.fromOffset(8,46), BackgroundTransparency=1}, sec)
+	new("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal, Padding=UDim.new(0,4)}, row)
+	local btns = {}
+	for i, amt in ipairs(CONFIG.TICKET_AMOUNTS) do
+		local b = makeButton(row, formatExact(amt), UDim2.fromOffset(50,22), C.panelAlt)
+		b.LayoutOrder = i; btns[amt] = b
+		b.MouseButton1Click:Connect(function()
+			State.selectedTicket = amt
+			for a, bb in pairs(btns) do bb.BackgroundColor3 = (a==amt) and C.blue or C.panelAlt end
+			requestSave()
+		end)
+	end
+	local buy = makeButton(sec, "Purchase Tickets", UDim2.fromOffset(160,24), C.blue, Color3.new(1,1,1))
+	buy.Position = UDim2.fromOffset(8,78)
+	buy.MouseButton1Click:Connect(function()
+		if State.selectedTicket > CONFIG.MAX_AMOUNT then setStatus("Amount exceeds MAX_AMOUNT.", "error"); return end
+		local ok, msg = Network.purchase("Tickets", "Ticket", State.selectedTicket)
+		setStatus(ok and string.format("Tickets: requesting %d", State.selectedTicket) or ("Tickets failed: "..tostring(msg)),
+			ok and "info" or "error")
+	end)
+	Pages.Tickets = {frame=page, update=function()
+		local qty = Inventory.get("Tickets")
+		cur.Text = "In inventory: "..(qty and formatExact(qty) or "Unavailable")
+		cur.TextColor3 = qty and C.text or C.muted
+		for a, bb in pairs(btns) do bb.BackgroundColor3 = (a==State.selectedTicket) and C.blue or C.panelAlt end
+	end}
+end
+
+local function buildPlayerInfo()
+	local page = makePage("PlayerInfo")
+	local sec = makeSection(page, "PLAYER INFO", 0, 1)
+	sec.AutomaticSize = Enum.AutomaticSize.Y
+	new("UIPadding", {PaddingBottom=UDim.new(0,6)}, sec)
+	local list = new("Frame", {Size=UDim2.new(1,-16,0,0), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, AutomaticSize=Enum.AutomaticSize.Y}, sec)
+	new("UIListLayout", {Padding=UDim.new(0,2)}, list)
+	local function addRow(label, value, color)
+		new("TextLabel", {Size=UDim2.new(1,0,0,14), BackgroundTransparency=1,
+			Text=string.format("%s: %s", label, value), TextColor3=color or C.text,
+			Font=FONT, TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, list)
+	end
+	Pages.PlayerInfo = {frame=page, update=function()
+		for _, ch in ipairs(list:GetChildren()) do if ch:IsA("TextLabel") then ch:Destroy() end end
+		local stats = Cache and Cache:Get()
+		if not stats then addRow("Stats", "Unavailable", C.muted); return end
+		if StatTools then
+			local ok, lt = pcall(function() return StatTools.GetTotal(stats, {"Honey"}) end)
+			addRow("Lifetime Honey", ok and formatExact(lt) or "Unavailable", C.gold)
+			local ok2, pt = pcall(function() return StatTools.GetTotalPlaytime(stats, true) end)
+			addRow("Playtime", ok2 and (formatExact(math.floor(pt)).."s") or "Unavailable")
+			local ok3, bc = pcall(function() return StatTools.CountBees(stats) end)
+			addRow("Bees", ok3 and formatExact(bc) or "Unavailable", C.green)
+			local gifted = getGiftedTypesDiscovered()
+			addRow("Gifted types", gifted and string.format("%s / %d", formatExact(gifted), CONFIG.GIFTED_TYPES_TOTAL) or "Unavailable")
+		end
+		local h = getCurrentHoney()
+		addRow("Current Honey", h and formatExact(h) or "Unavailable", C.gold)
+	end}
+end
+
+local function buildInventory()
+	local page = makePage("Inventory")
+	local searchBar = new("Frame", {Size=UDim2.new(1,0,0,26), BackgroundColor3=C.panel,
+		BorderSizePixel=0, LayoutOrder=1}, page)
+	corner(searchBar, 6); stroke(searchBar, C.stroke, 1)
+	local searchBox = new("TextBox", {Size=UDim2.new(1,-16,1,0), Position=UDim2.fromOffset(8,0),
+		BackgroundTransparency=1, PlaceholderText="Search filtered items…", PlaceholderColor3=C.muted,
+		Text="", TextColor3=C.text, Font=FONT, TextSize=10, TextXAlignment=Enum.TextXAlignment.Left,
+		ClearTextOnFocus=false}, searchBar)
+	local gridFrame = new("Frame", {Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
+		BackgroundTransparency=1, LayoutOrder=2}, page)
+	new("UIGridLayout", {CellSize=UDim2.new(0.5,-4,0,26), CellPadding=UDim2.fromOffset(8,4),
+		SortOrder=Enum.SortOrder.LayoutOrder}, gridFrame)
+	local rows = {}
+	for i, display in ipairs(INVENTORY_FILTER) do
+		local cell = new("Frame", {BackgroundColor3=C.panel, BorderSizePixel=0, LayoutOrder=i}, gridFrame)
+		corner(cell, 5); stroke(cell, C.stroke, 1)
+		new("TextLabel", {Size=UDim2.new(1,-80,1,0), Position=UDim2.fromOffset(8,0),
+			BackgroundTransparency=1, Text=display, TextColor3=C.text, Font=FONT, TextSize=10,
+			TextXAlignment=Enum.TextXAlignment.Left}, cell)
+		local qty = new("TextLabel", {Size=UDim2.new(0,60,1,0), Position=UDim2.new(1,-68,0,0),
+			BackgroundTransparency=1, Text="—", TextColor3=C.muted, Font=FONT_MED, TextSize=10,
+			TextXAlignment=Enum.TextXAlignment.Right}, cell)
+		rows[display] = {cell=cell, qty=qty}
+	end
+	searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+		local q = searchBox.Text:lower()
+		for display, row in pairs(rows) do
+			row.cell.Visible = (q == "") or display:lower():find(q, 1, true) ~= nil
+		end
+	end)
+	Pages.Inventory = {frame=page, update=function()
+		for _, display in ipairs(INVENTORY_FILTER) do
+			local row = rows[display]
+			if row then
+				local qty = Inventory.get(ITEM_TYPES[display])
+				row.qty.Text = qty and formatExact(qty) or "Unavailable"
+				row.qty.TextColor3 = qty and C.text or C.muted
+			end
+		end
+	end}
+end
+
+local function buildRecipes()
+	local page = makePage("RecipeCalc")
+	local head = makeSection(page, "RECIPE CALCULATOR", 78, 1)
+	local nameLbl = new("TextLabel", {Size=UDim2.new(0,180,0,22), Position=UDim2.fromOffset(8,26),
+		BackgroundColor3=C.panelAlt, Text="", TextColor3=C.text, Font=FONT_MED, TextSize=11, BorderSizePixel=0}, head)
+	corner(nameLbl, 5)
+	local qtyLbl = new("TextLabel", {Size=UDim2.fromOffset(60,22), Position=UDim2.fromOffset(194,26),
+		BackgroundColor3=C.panelAlt, Text=tostring(State.recipeQty), TextColor3=C.text,
+		Font=FONT_MED, TextSize=11, BorderSizePixel=0}, head)
+	corner(qtyLbl, 5)
+	local prev = makeButton(head, "◀", UDim2.fromOffset(26,22), C.panelAlt); prev.Position = UDim2.fromOffset(258,26)
+	local next = makeButton(head, "▶", UDim2.fromOffset(26,22), C.panelAlt); next.Position = UDim2.fromOffset(288,26)
+	local minus = makeButton(head, "–", UDim2.fromOffset(24,22), C.panelAlt); minus.Position = UDim2.fromOffset(318,26)
+	local plus = makeButton(head, "+", UDim2.fromOffset(24,22), C.panelAlt); plus.Position = UDim2.fromOffset(346,26)
+	local outSec = makeSection(page, "DIRECT INGREDIENTS", 0, 2)
+	outSec.AutomaticSize = Enum.AutomaticSize.Y
+	new("UIPadding", {PaddingBottom=UDim.new(0,6)}, outSec)
+	local outList = new("Frame", {Size=UDim2.new(1,-16,0,0), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, AutomaticSize=Enum.AutomaticSize.Y}, outSec)
+	new("UIListLayout", {Padding=UDim.new(0,2)}, outList)
+	local baseSec = makeSection(page, "BASE BREAKDOWN", 0, 3)
+	baseSec.AutomaticSize = Enum.AutomaticSize.Y
+	new("UIPadding", {PaddingBottom=UDim.new(0,6)}, baseSec)
+	local baseList = new("Frame", {Size=UDim2.new(1,-16,0,0), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, AutomaticSize=Enum.AutomaticSize.Y}, baseSec)
+	new("UIListLayout", {Padding=UDim.new(0,2)}, baseList)
+	local function expandBase(internal, qty, out, depth)
+		depth = depth or 0
+		if qty <= 0 then return end
+		if depth > 6 then out[internal] = (out[internal] or 0) + qty; return end
+		local recipe = BlenderRecipes and BlenderRecipes.Get(internal)
+		if not recipe then out[internal] = (out[internal] or 0) + qty; return end
+		for _, ing in ipairs(recipe.Ingredients) do expandBase(ing.Type, ing.Amount * qty, out, depth + 1) end
+	end
+	local function rebuild()
+		local internal = RECIPE_TYPES[State.recipeIndex]
+		nameLbl.Text = Recipe.display(internal); qtyLbl.Text = tostring(State.recipeQty)
+		for _, ch in ipairs(outList:GetChildren()) do if ch:IsA("TextLabel") then ch:Destroy() end end
+		for _, ch in ipairs(baseList:GetChildren()) do if ch:IsA("TextLabel") then ch:Destroy() end end
+		local recipe = BlenderRecipes and BlenderRecipes.Get(internal); if not recipe then return end
+		for _, ing in ipairs(recipe.Ingredients) do
+			local need = ing.Amount * State.recipeQty; local have = Inventory.get(ing.Type)
+			local miss = have and math.max(0, need - have) or nil
+			new("TextLabel", {Size=UDim2.new(1,0,0,14), BackgroundTransparency=1,
+				Text=string.format("%s — need %s (have %s, miss %s)", Recipe.display(ing.Type),
+					formatExact(need), have and formatExact(have) or "?", miss and formatExact(miss) or "?"),
+				TextColor3=(miss and miss == 0) and C.green or C.text, Font=FONT, TextSize=10,
+				TextXAlignment=Enum.TextXAlignment.Left}, outList)
+		end
+		local base = {}; expandBase(internal, State.recipeQty, base)
+		local sorted = {}; for k in pairs(base) do sorted[#sorted+1] = k end; table.sort(sorted)
+		for _, k in ipairs(sorted) do
+			local need, have = base[k], Inventory.get(k)
+			local miss = have and math.max(0, need - have) or nil
+			new("TextLabel", {Size=UDim2.new(1,0,0,14), BackgroundTransparency=1,
+				Text=string.format("%s — need %s (have %s, miss %s)", Recipe.display(k),
+					formatExact(need), have and formatExact(have) or "?", miss and formatExact(miss) or "?"),
+				TextColor3=(miss and miss == 0) and C.green or C.text, Font=FONT, TextSize=10,
+				TextXAlignment=Enum.TextXAlignment.Left}, baseList)
+		end
+	end
+	prev.MouseButton1Click:Connect(function() State.recipeIndex = ((State.recipeIndex - 2) % #RECIPE_TYPES) + 1; rebuild(); requestSave() end)
+	next.MouseButton1Click:Connect(function() State.recipeIndex = (State.recipeIndex % #RECIPE_TYPES) + 1; rebuild(); requestSave() end)
+	minus.MouseButton1Click:Connect(function() State.recipeQty = math.max(1, State.recipeQty - 1); rebuild(); requestSave() end)
+	plus.MouseButton1Click:Connect(function() State.recipeQty = State.recipeQty + 1; rebuild(); requestSave() end)
+	rebuild()
+	Pages.RecipeCalc = {frame=page, update=function() rebuild() end}
+end
+
+local function buildQuest()
+	local page = makePage("Quest")
+	local qProgLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,16), Position=UDim2.fromOffset(8,26),
+		BackgroundTransparency=1, Text="Spirit Bear Progress: ?/10", TextColor3=C.gold, Font=FONT_BOLD,
+		TextSize=12, TextXAlignment=Enum.TextXAlignment.Left}, page)
+	local qSec = makeSection(page, "SPIRIT BEAR PROGRESS", 60, 1)
+	local qNameLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,16), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, Text="Current: Loading...", TextColor3=C.text, Font=FONT_MED,
+		TextSize=11, TextXAlignment=Enum.TextXAlignment.Left}, qSec)
+	local reqSec = makeSection(page, "REQUIREMENTS", 0, 2)
+	reqSec.AutomaticSize = Enum.AutomaticSize.Y
+	new("UIPadding", {PaddingBottom=UDim.new(0,6)}, reqSec)
+	local reqList = new("Frame", {Size=UDim2.new(1,-16,0,0), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, AutomaticSize=Enum.AutomaticSize.Y}, reqSec)
+	new("UIListLayout", {Padding=UDim.new(0,2)}, reqList)
+	local autoSec = makeSection(page, "AUTOMATION", 130, 3)
+	local beanBtn = makeButton(autoSec, "Auto Magic Bean: OFF", UDim2.fromOffset(130,22), C.panelAlt)
+	beanBtn.Position = UDim2.fromOffset(8, 26)
+	local diceBtn = makeButton(autoSec, "Auto Field Dice: OFF", UDim2.fromOffset(130,22), C.panelAlt)
+	diceBtn.Position = UDim2.fromOffset(8, 54)
+	local statusLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,40), Position=UDim2.fromOffset(8,82),
+		BackgroundTransparency=1, Text="Auto: OFF", TextColor3=C.muted, Font=FONT, TextSize=9,
+		TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, autoSec)
+	questStatusLabel = statusLbl
+	beanBtn.MouseButton1Click:Connect(function()
+		State.autoMagicBean = not State.autoMagicBean
+		beanBtn.Text = State.autoMagicBean and "Auto Magic Bean: ON" or "Auto Magic Bean: OFF"
+		beanBtn.BackgroundColor3 = State.autoMagicBean and C.green or C.panelAlt
+		QuestAuto.beanPending = nil; QuestAuto.beanFailStreak = 0; QuestAuto.beanPauseUntil = 0
+		setQuestStatus(State.autoMagicBean and "Auto Magic Bean enabled." or "Auto Magic Bean disabled.",
+			State.autoMagicBean and "good" or "warn")
+		requestSave()
+	end)
+	diceBtn.MouseButton1Click:Connect(function()
+		State.autoFieldDice = not State.autoFieldDice
+		diceBtn.Text = State.autoFieldDice and "Auto Field Dice: ON" or "Auto Field Dice: OFF"
+		diceBtn.BackgroundColor3 = State.autoFieldDice and C.green or C.panelAlt
+		QuestAuto.dicePending = nil; QuestAuto.diceFailStreak = 0; QuestAuto.dicePauseUntil = 0
+		setQuestStatus(State.autoFieldDice and "Auto Field Dice enabled." or "Auto Field Dice disabled.",
+			State.autoFieldDice and "good" or "warn")
+		requestSave()
+	end)
+	beanBtn.Text = State.autoMagicBean and "Auto Magic Bean: ON" or "Auto Magic Bean: OFF"
+	beanBtn.BackgroundColor3 = State.autoMagicBean and C.green or C.panelAlt
+	diceBtn.Text = State.autoFieldDice and "Auto Field Dice: ON" or "Auto Field Dice: OFF"
+	diceBtn.BackgroundColor3 = State.autoFieldDice and C.green or C.panelAlt
+	Pages.Quest = {frame=page, update=function()
+		local qName, qNum, tasks, progress = getSpiritBearQuestData()
+		local questData = qName and SPIRIT_BEAR_QUEST_DATA[qName]
+		if qName and questData then
+			qProgLbl.Text = string.format("Spirit Bear Progress: %d/10 — %s", questData.number, qName)
+			qProgLbl.TextColor3 = C.gold
+			qNameLbl.Text = "Current: "..qName; qNameLbl.TextColor3 = C.text
+			for _, ch in ipairs(reqList:GetChildren()) do if ch:IsA("TextLabel") then ch:Destroy() end end
+			for i, reqText in ipairs(questData.requirements) do
+				local isComplete = progress and progress[i] and progress[i][1] >= 1
+				new("TextLabel", {Size=UDim2.new(1,-4,0,14), BackgroundTransparency=1, Text=reqText,
+					TextColor3=isComplete and C.green or C.red, Font=FONT, TextSize=10,
+					TextXAlignment=Enum.TextXAlignment.Left, TextTruncate=Enum.TextTruncate.AtEnd}, reqList)
+			end
+			beanBtn.TextColor3 = (questData.number == 6) and C.text or C.muted
+			diceBtn.TextColor3 = (questData.number == 9) and C.text or C.muted
+		else
+			qProgLbl.Text = "Spirit Bear Progress: Unknown/10"; qProgLbl.TextColor3 = C.muted
+			qNameLbl.Text = "Current: No active Spirit Bear quest found"; qNameLbl.TextColor3 = C.muted
+			for _, ch in ipairs(reqList:GetChildren()) do if ch:IsA("TextLabel") then ch:Destroy() end end
+		end
+		if not State.autoMagicBean and not State.autoFieldDice then
+			statusLbl.Text = "Auto: OFF"; statusLbl.TextColor3 = C.muted
+		end
+	end}
+end
+
+local function buildGearRequirements()
+	local page = makePage("GearRequirements")
+	local panels = {}
+	for i, gear in ipairs(GEARS) do
+		local h = 26 + #gear.requirements * 16 + 30 + 6
+		local sec = makeSection(page, gear.name, h, i)
+		local header = sec:FindFirstChild("TextLabel")
+		local badge = new("TextLabel", {Size=UDim2.fromOffset(70,14), Position=UDim2.new(1,-78,0,6),
+			BackgroundTransparency=1, Text="MISSING", TextColor3=C.gold, Font=FONT_BOLD, TextSize=9,
+			TextXAlignment=Enum.TextXAlignment.Right}, sec)
+		local list = new("Frame", {Size=UDim2.new(1,-16,0,#gear.requirements*16),
+			Position=UDim2.fromOffset(8,26), BackgroundTransparency=1}, sec)
+		new("UIListLayout", {Padding=UDim.new(0,0)}, list)
+		local labels = {}
+		for j = 1, #gear.requirements do
+			labels[j] = new("TextLabel", {Size=UDim2.new(1,0,0,16), BackgroundTransparency=1,
+				Text="", TextColor3=C.text, Font=FONT, TextSize=10,
+				TextXAlignment=Enum.TextXAlignment.Left}, list)
+		end
+		local abY = 26 + #gear.requirements * 16 + 2
+		local rjLbl = new("TextLabel", {Size=UDim2.fromOffset(70,20), Position=UDim2.fromOffset(8,abY),
+			BackgroundTransparency=1, Text="Royal Jelly:", TextColor3=C.text, Font=FONT, TextSize=10}, sec)
+		local rjAmt = new("TextLabel", {Size=UDim2.fromOffset(80,20), Position=UDim2.fromOffset(82,abY),
+			BackgroundTransparency=1, Text="0", TextColor3=C.green, Font=FONT_BOLD, TextSize=11}, sec)
+		local rjBtn = makeButton(sec, "Auto Buy: OFF", UDim2.fromOffset(96,20), C.panelAlt)
+		rjBtn.Position = UDim2.fromOffset(168, abY)
+		rjBtn.MouseButton1Click:Connect(function()
+			if Ownership.owns(gear) then return end
+			State.autoBuyRJ[gear.id] = not State.autoBuyRJ[gear.id]
+			rjBtn.Text = State.autoBuyRJ[gear.id] and "Auto Buy: ON" or "Auto Buy: OFF"
+			rjBtn.BackgroundColor3 = State.autoBuyRJ[gear.id] and C.green or C.panelAlt
+			requestSave()
+		end)
+		panels[gear.id] = {gear=gear, section=sec, header=header, badge=badge,
+			labels=labels, rjLbl=rjLbl, rjAmt=rjAmt, rjBtn=rjBtn}
+	end
+	Pages.GearRequirements = {frame=page, update=function()
+		local res = AutoBuy.compute()
+		for id, panel in pairs(panels) do
+			local g = res.perGear[id]
+			for j, lbl in ipairs(panel.labels) do
+				local r = panel.gear.requirements[j]
+				local name = r[1] == HONEY and "Honey" or Recipe.display(r[1])
+				if g.owned then
+					lbl.Text = string.format("%s — %s ✓", name, formatExact(r[2])); lbl.TextColor3 = C.green
+				else
+					local avail = r[1] == HONEY and getCurrentHoney() or Inventory.get(r[1])
+					if avail ~= nil then
+						local miss = math.max(0, r[2] - avail)
+						lbl.Text = string.format("%s: need %s, have %s, miss %s",
+							name, formatExact(r[2]), formatExact(avail), formatExact(miss))
+						lbl.TextColor3 = (miss == 0) and C.green or C.text
+					else
+						lbl.Text = string.format("%s: need %s (avail ?)", name, formatExact(r[2]))
+						lbl.TextColor3 = C.muted
+					end
+				end
+			end
+			if g.owned then
+				panel.section.BackgroundColor3 = Color3.fromRGB(24,56,40)
+				panel.section.UIStroke.Color = C.green; panel.header.TextColor3 = C.green
+				panel.badge.Text = "OWNED"; panel.badge.TextColor3 = C.green
+				panel.rjLbl.Visible = false; panel.rjAmt.Visible = false; panel.rjBtn.Visible = false
+			else
+				panel.section.BackgroundColor3 = C.panel; panel.section.UIStroke.Color = C.stroke
+				panel.header.TextColor3 = C.text
+				panel.badge.Text = "MISSING"; panel.badge.TextColor3 = C.gold
+				panel.rjLbl.Visible = true; panel.rjAmt.Visible = true; panel.rjBtn.Visible = true
+				local m = AutoBuy.computeRJForGear(panel.gear)
+				panel.rjAmt.Text = m > 0 and ("-"..formatExact(m)) or "0"
+				panel.rjAmt.TextColor3 = m > 0 and C.red or C.green
+				panel.rjBtn.Text = State.autoBuyRJ[panel.gear.id] and "Auto Buy: ON" or "Auto Buy: OFF"
+				panel.rjBtn.BackgroundColor3 = State.autoBuyRJ[panel.gear.id] and C.green or C.panelAlt
+			end
+		end
+	end}
+end
+
+local function buildAutoBuy()
+	local page = makePage("AutoBuy")
+	local head = makeSection(page, "AUTO BUY", 90, 1)
+	local resetBtn = makeButton(head, "Reset Config", UDim2.fromOffset(100,20), C.panelAlt)
+	resetBtn.Position = UDim2.fromOffset(8, 60)
+	resetBtn.MouseButton1Click:Connect(function()
+		State.autoBuyRJ = {DiamondMask=false,PetalBelt=false,CrimsonGuard=false,CobaltGuard=false}
+		State.autoBuyDiamondEgg = false; State.autoMagicBean = false
+		State.autoFieldDice = false; State.autoSpeedUp = false
+		BlenderAuto.lastAttemptAt = 0; BlenderAuto.failStreak = 0; BlenderAuto.pauseUntil = 0
+		MagicBeanAuto.lastAttemptAt = 0; MagicBeanAuto.failStreak = 0; MagicBeanAuto.pauseUntil = 0
+		State.selectedRJ = 1; State.selectedTicket = 1
+		State.recipeIndex = 1; State.recipeQty = 1; State.blenderQty = 1
+		SaveSystem.save(); setStatus("Config reset.", "warn")
+		for _, p in pairs(Pages) do if p.update then pcall(p.update) end end
+	end)
+	local deSec = makeSection(page, "DIAMOND EGGS", 74, 2)
+	local deAmt = new("TextLabel", {Size=UDim2.fromOffset(80,20), Position=UDim2.fromOffset(128,28),
+		BackgroundTransparency=1, Text="0", TextColor3=C.green, Font=FONT_BOLD, TextSize=12}, deSec)
+	local deBtn = makeButton(deSec, "Auto Buy: OFF", UDim2.fromOffset(110,22), C.panelAlt)
+	deBtn.Position = UDim2.fromOffset(210,28)
+	deBtn.MouseButton1Click:Connect(function()
+		State.autoBuyDiamondEgg = not State.autoBuyDiamondEgg
+		deBtn.Text = State.autoBuyDiamondEgg and "Auto Buy: ON" or "Auto Buy: OFF"
+		deBtn.BackgroundColor3 = State.autoBuyDiamondEgg and C.green or C.panelAlt
+		requestSave()
+	end)
+	local sumSec = makeSection(page, "AUTO BUY SUMMARY", 0, 3)
+	sumSec.AutomaticSize = Enum.AutomaticSize.Y
+	new("UIPadding", {PaddingBottom=UDim.new(0,6)}, sumSec)
+	local sumLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,0), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, AutomaticSize=Enum.AutomaticSize.Y, Text="", TextColor3=C.text,
+		Font=FONT, TextSize=9, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
+		TextYAlignment=Enum.TextYAlignment.Top}, sumSec)
+	Pages.AutoBuy = {frame=page, update=function()
+		local miss = AutoBuy.computeDiamondEggMissing()
+		deAmt.Text = miss > 0 and ("-"..formatExact(miss)) or "0"
+		deAmt.TextColor3 = miss > 0 and C.red or C.green
+		deBtn.Text = State.autoBuyDiamondEgg and "Auto Buy: ON" or "Auto Buy: OFF"
+		deBtn.BackgroundColor3 = State.autoBuyDiamondEgg and C.green or C.panelAlt
+		local lines = {}
+		for _, gear in ipairs(GEARS) do
+			local on = State.autoBuyRJ[gear.id]; local owned = Ownership.owns(gear)
+			lines[#lines+1] = string.format("%s — RJ: %s", gear.name,
+				owned and "OWNED (disabled)" or (on and "ON" or "OFF"))
+		end
+		lines[#lines+1] = string.format("Diamond Egg — %s", State.autoBuyDiamondEgg and "ON" or "OFF")
+		lines[#lines+1] = string.format("Auto Magic Bean (Quest) — %s", State.autoMagicBean and "ON" or "OFF")
+		lines[#lines+1] = string.format("Auto Field Dice — %s", State.autoFieldDice and "ON" or "OFF")
+		lines[#lines+1] = string.format("Auto Speed Up — %s", State.autoSpeedUp and "ON" or "OFF")
+		lines[#lines+1] = string.format("Glue Dispenser — %s", Toys["Glue Dispenser"].lastState or "?")
+		lines[#lines+1] = string.format("Wealth Clock — %s", Toys["Wealth Clock"].lastState or "?")
+		lines[#lines+1] = string.format("Magic Beans for Glitter — need %d", AutoBuy.computeMagicBeansToPurchase())
+		sumLbl.Text = table.concat(lines, "\n")
+	end}
+end
+
+local function buildBuildHive()
+	local page = makePage("BuildHive")
+
+	local prioSec = makeSection(page, "FIRST STAGE (PRIORITY BEES)", 0, 1)
+	prioSec.AutomaticSize = Enum.AutomaticSize.Y
+	new("UIPadding", {PaddingBottom=UDim.new(0,6)}, prioSec)
+	local prioList = new("Frame", {Size=UDim2.new(1,-16,0,0), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, AutomaticSize=Enum.AutomaticSize.Y}, prioSec)
+	new("UIListLayout", {Padding=UDim.new(0,2)}, prioList)
+	local prioLabels = {}
+	for _, beeName in ipairs(BuildHive.priorityOrder) do
+		local row = new("Frame", {Size=UDim2.new(1,0,0,16), BackgroundTransparency=1}, prioList)
+		new("TextLabel", {Size=UDim2.new(0,100,1,0), BackgroundTransparency=1,
+			Text=beeName.." Bee", TextColor3=C.text, Font=FONT, TextSize=10,
+			TextXAlignment=Enum.TextXAlignment.Left}, row)
+		local cnt = new("TextLabel", {Size=UDim2.new(1,-100,1,0), Position=UDim2.fromOffset(100,0),
+			BackgroundTransparency=1, Text="0 / 1", TextColor3=C.muted, Font=FONT_MED,
+			TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, row)
+		prioLabels[beeName] = cnt
+	end
+
+	local compSec = makeSection(page, "TARGET COMPOSITION (LEGENDARY)", 0, 2)
+	compSec.AutomaticSize = Enum.AutomaticSize.Y
+	new("UIPadding", {PaddingBottom=UDim.new(0,6)}, compSec)
+	local compList = new("Frame", {Size=UDim2.new(1,-16,0,0), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, AutomaticSize=Enum.AutomaticSize.Y}, compSec)
+	new("UIListLayout", {Padding=UDim.new(0,2)}, compList)
+	local compLabels = {}
+	for _, beeName in ipairs(BuildHive.targetOrder) do
+		local row = new("Frame", {Size=UDim2.new(1,0,0,16), BackgroundTransparency=1}, compList)
+		new("TextLabel", {Size=UDim2.new(0,100,1,0), BackgroundTransparency=1,
+			Text=beeName.." Bee", TextColor3=C.text, Font=FONT, TextSize=10,
+			TextXAlignment=Enum.TextXAlignment.Left}, row)
+		local cnt = new("TextLabel", {Size=UDim2.new(1,-100,1,0), Position=UDim2.fromOffset(100,0),
+			BackgroundTransparency=1, Text="0 / 0", TextColor3=C.muted, Font=FONT_MED,
+			TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, row)
+		compLabels[beeName] = cnt
+	end
+
+	local statusSec = makeSection(page, "BUILD STATUS", 0, 3)
+	statusSec.AutomaticSize = Enum.AutomaticSize.Y
+	new("UIPadding", {PaddingBottom=UDim.new(0,6)}, statusSec)
+	local phaseLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,14), Position=UDim2.fromOffset(8,22),
+		BackgroundTransparency=1, Text="Phase: —", TextColor3=C.muted, Font=FONT_MED,
+		TextSize=9, TextXAlignment=Enum.TextXAlignment.Left}, statusSec)
+	local ulLegendaryLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,14), Position=UDim2.fromOffset(8,38),
+		BackgroundTransparency=1, Text="Until Legendary: — (auto)", TextColor3=C.muted, Font=FONT,
+		TextSize=9, TextXAlignment=Enum.TextXAlignment.Left}, statusSec)
+	local statusLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,0), Position=UDim2.fromOffset(8,56),
+		BackgroundTransparency=1, AutomaticSize=Enum.AutomaticSize.Y, Text="Idle",
+		TextColor3=C.muted, Font=FONT, TextSize=10, TextWrapped=true,
+		TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, statusSec)
+
+	local statsSec = makeSection(page, "HIVE STATISTICS", 78, 4)
+	local emptyLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,14), Position=UDim2.fromOffset(8,24),
+		BackgroundTransparency=1, Text="Empty slots: —", TextColor3=C.muted, Font=FONT,
+		TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, statsSec)
+	local eligibleLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,14), Position=UDim2.fromOffset(8,40),
+		BackgroundTransparency=1, Text="Eligible slots: —", TextColor3=C.muted, Font=FONT,
+		TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, statsSec)
+	local protectedLbl = new("TextLabel", {Size=UDim2.new(1,-16,0,14), Position=UDim2.fromOffset(8,56),
+		BackgroundTransparency=1, Text="Protected slots: —", TextColor3=C.muted, Font=FONT,
+		TextSize=10, TextXAlignment=Enum.TextXAlignment.Left}, statsSec)
+
+	local ctrlSec = makeSection(page, "CONTROLS", 106, 5)
+	local startBtn = makeButton(ctrlSec, "Start Build", UDim2.fromOffset(160,28), C.blue, Color3.new(1,1,1))
+	startBtn.Position = UDim2.fromOffset(8, 24)
+	new("TextLabel", {Size=UDim2.new(1,-16,0,44), Position=UDim2.fromOffset(8,58),
+		BackgroundTransparency=1, Text="Royal Jelly produces a random Legendary — success is not guaranteed. Stage 1 obtains the six priority bees (Until Legendary OFF). Stage 2 completes the Legendary targets (Until Legendary ON). Excess target Legendaries are cleaned up automatically. Bee protection rules apply. Click Start Build again to stop.",
+		TextColor3=C.muted, Font=FONT, TextSize=8, TextWrapped=true,
+		TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, ctrlSec)
+	startBtn.MouseButton1Click:Connect(function()
+		BuildHive.running = not BuildHive.running
+		if BuildHive.running then
+			BuildHive.status = "Scanning Hive"
+			BuildHive.failStreak = 0
+			BuildHive.pauseUntil = 0
+			BuildHive.pendingSlot = nil
+			BuildHive.pendingTargetBee = nil
+			BuildHive.slotCooldowns = {}
+			BuildHive.lastConfirmedAt = 0
+			StageControl.currentStage = nil
+			StageControl.stageEnteredAt = 0
+			StageControl.lastRetryAt = 0
+			setStatus("Build Hive started", "info")
+			print("[BuildHive] START")
+		else
+			BuildHive.pendingSlot = nil
+			BuildHive.pendingTargetBee = nil
+			BuildHive.status = "Stopped"
+			setStatus("Build Hive stopped", "warn")
+			print("[BuildHive] STOP")
+		end
+		startBtn.BackgroundColor3 = BuildHive.running and C.green or C.blue
+	end)
+
+	local jellySec = makeSection(page, "AUTO JELLY SETTINGS", 0, 6)
+	jellySec.AutomaticSize = Enum.AutomaticSize.Y
+	new("UIPadding", {PaddingBottom=UDim.new(0,8)}, jellySec)
+	local jellyButtons, jellyStatusLbls = {}, {}
+	local visibleKeys = {"RollToMythic", "RollToGifted"}
+	for i, key in ipairs(visibleKeys) do
+		local row = new("Frame", {Size=UDim2.new(1,-16,0,26),
+			Position=UDim2.fromOffset(8, 24 + (i-1)*30), BackgroundTransparency=1}, jellySec)
+		new("TextLabel", {Size=UDim2.new(0,140,1,0), BackgroundTransparency=1,
+			Text=JellySettings.labels[key], TextColor3=C.text, Font=FONT_MED, TextSize=10,
+			TextXAlignment=Enum.TextXAlignment.Left}, row)
+		local btn = makeButton(row, "OFF", UDim2.fromOffset(70,22), C.panelAlt)
+		btn.Position = UDim2.new(1, -170, 0, 2)
+		local statusLbl2 = new("TextLabel", {Size=UDim2.new(0,90,1,0), Position=UDim2.new(1,-90,0,0),
+			BackgroundTransparency=1, Text="Unknown", TextColor3=C.muted, Font=FONT,
+			TextSize=9, TextXAlignment=Enum.TextXAlignment.Left}, row)
+		jellyButtons[key] = btn; jellyStatusLbls[key] = statusLbl2
+		btn.MouseButton1Click:Connect(function()
+			local _, currentVal = JellySettings.getDisplay(key)
+			local newVal = (currentVal == true) and false or true
+			local ok, msg = JellySettings.setValue(key, newVal)
+			if ok then
+				setStatus("Setting "..JellySettings.labels[key].." → "..(newVal and "ON" or "OFF"), "info")
+			else
+				setStatus("Setting "..JellySettings.labels[key].." failed: "..tostring(msg), "error")
+			end
+		end)
+	end
+	new("TextLabel", {Size=UDim2.new(1,-16,0,20), Position=UDim2.fromOffset(8, 24 + #visibleKeys*30),
+		BackgroundTransparency=1, Text="Until Legendary is auto-managed by the Build Hive stage (Stage 1: OFF, Stage 2: ON, Cleanup: OFF).",
+		TextColor3=C.muted, Font=FONT, TextSize=8, TextWrapped=true,
+		TextXAlignment=Enum.TextXAlignment.Left}, jellySec)
+
+	Pages.BuildHive = {frame=page, update=function()
+		local cells = scanHive()
+		if cells then
+			local state, priorityCounts, stage = computeAll(cells)
+			local emptyCount = countEmpty(cells)
+			local now = os.clock()
+			local eligCount, protCount = 0, 0
+			for key, cell in pairs(cells) do
+				if cell.beeType then
+					local ready = (not BuildHive.slotCooldowns[key]) or now >= BuildHive.slotCooldowns[key]
+					local kind = classifyBee(cell.beeType, state, priorityCounts)
+					if isEligibleKind(kind) then
+						if ready then eligCount = eligCount + 1 end
+					elseif kind ~= "priority_protected" and kind ~= "target_at_or_below" then
+						protCount = protCount + 1
+					end
+				end
+			end
+
+			for _, beeName in ipairs(BuildHive.priorityOrder) do
+				local have = priorityCounts[beeName] or 0
+				local need = BuildHive.priority[beeName]
+				local lbl = prioLabels[beeName]
+				if have >= need then
+					lbl.Text = string.format("%d/%d — Complete", have, need)
+					lbl.TextColor3 = C.green
+				else
+					lbl.Text = string.format("%d/%d — Missing %d", have, need, need - have)
+					lbl.TextColor3 = C.gold
+				end
+			end
+
+			for _, beeName in ipairs(BuildHive.targetOrder) do
+				local s = state[beeName]
+				local lbl = compLabels[beeName]
+				local text, color
+				if s.category == "complete" then
+					text = string.format("%d/%d — Complete", s.current, s.target); color = C.green
+				elseif s.category == "missing" then
+					text = string.format("%d/%d — Missing %d", s.current, s.target, s.delta); color = C.gold
+				else
+					text = string.format("%d/%d — Excess %d", s.current, s.target, s.delta); color = C.red
+				end
+				lbl.Text = text; lbl.TextColor3 = color
+			end
+
+			emptyLbl.Text = string.format("Empty slots: %d", emptyCount)
+			emptyLbl.TextColor3 = emptyCount > 0 and C.gold or C.muted
+			eligibleLbl.Text = string.format("Eligible slots: %d", eligCount)
+			eligibleLbl.TextColor3 = eligCount > 0 and C.text or C.muted
+			protectedLbl.Text = string.format("Protected slots: %d", protCount)
+			protectedLbl.TextColor3 = C.muted
+
+			local phaseText, phaseColor
+			if stage == "priority" then
+				phaseText, phaseColor = "Phase: Stage 1 — obtaining priority bees", C.blue
+			elseif stage == "building" then
+				phaseText, phaseColor = "Phase: Stage 2 — building Legendary targets", C.purple
+			elseif stage == "cleanup" then
+				phaseText, phaseColor = "Phase: Stage 2 — cleanup (targets met)", C.gold
+			else
+				phaseText, phaseColor = "Phase: Complete — all targets exact", C.green
+			end
+			phaseLbl.Text = phaseText
+			phaseLbl.TextColor3 = phaseColor
+
+			local disp, val, verifying = JellySettings.getDisplay("RollToLegendary")
+			local autoText, autoColor
+			if verifying then
+				autoText, autoColor = "Until Legendary: "..disp.." (verifying…)", C.gold
+			elseif val == true then
+				autoText, autoColor = "Until Legendary: ON (auto)", C.green
+			elseif val == false then
+				autoText, autoColor = "Until Legendary: OFF (auto)", C.muted
+			else
+				autoText, autoColor = "Until Legendary: "..disp.." (auto)", C.muted
+			end
+			ulLegendaryLbl.Text = autoText
+			ulLegendaryLbl.TextColor3 = autoColor
+
+			if BuildHive.running then
+				statusLbl.Text = BuildHive.status or "Idle"
+				statusLbl.TextColor3 = C.gold
+			elseif stage == "complete" then
+				statusLbl.Text = "Build Complete"
+				statusLbl.TextColor3 = C.green
+			else
+				statusLbl.Text = "Idle — press Start Build to begin."
+				statusLbl.TextColor3 = C.muted
+			end
+
+			startBtn.BackgroundColor3 = BuildHive.running and C.green or C.blue
+		end
+
+		for _, key in ipairs(visibleKeys) do
+			local disp, val, verifying = JellySettings.getDisplay(key)
+			local btn = jellyButtons[key]
+			btn.Text = disp
+			if verifying then btn.BackgroundColor3 = C.panelAlt; btn.TextColor3 = C.gold
+			elseif val == true then btn.BackgroundColor3 = C.green; btn.TextColor3 = Color3.new(1,1,1)
+			elseif val == false then btn.BackgroundColor3 = C.panelAlt; btn.TextColor3 = C.text
+			else btn.BackgroundColor3 = C.panelAlt; btn.TextColor3 = C.muted end
+			local slbl = jellyStatusLbls[key]
+			if verifying then slbl.Text = "Verifying…"; slbl.TextColor3 = C.gold
+			elseif val ~= nil then slbl.Text = "Synced"; slbl.TextColor3 = C.muted
+			else slbl.Text = "Unknown"; slbl.TextColor3 = C.muted end
+		end
+	end}
+end
+
+--=====================================================================
+-- 16. NAVIGATION
+--=====================================================================
+local NAV_ORDER = {
+	{key="Dashboard",label="Dashboard"},
+	{key="RoyalJelly",label="Royal Jelly"},
+	{key="Eggs",label="Eggs"},
+	{key="Blender",label="Blender"},
+	{key="Tickets",label="Tickets"},
+	{key="PlayerInfo",label="Player Info"},
+	{key="Inventory",label="Inventory"},
+	{key="RecipeCalc",label="Recipes"},
+	{key="Quest",label="Quest"},
+	{key="GearRequirements",label="Gear Reqs"},
+	{key="BuildHive",label="Build Hive"},
+	{key="AutoBuy",label="Auto Buy"},
+}
+local function showPage(key)
+	if not Pages[key] then return end
+	State.currentPage = key
+	for name, p in pairs(Pages) do p.frame.Visible = (name == key) end
+	for name, b in pairs(NavButtons) do
+		b.BackgroundColor3 = (name == key) and C.blue or C.panelAlt
+		b.TextColor3 = (name == key) and Color3.new(1,1,1) or C.text
+	end
+	local page = Pages[key]
+	if page and page.update then
+		local ok, err = pcall(page.update)
+		if not ok then warn("[Test Simulator] page update error: "..tostring(err)) end
+	end
+end
+for i, entry in ipairs(NAV_ORDER) do
+	local btn = new("TextButton", {Size=UDim2.new(1,-4,0,18), BackgroundColor3=C.panelAlt,
+		Text=entry.label, TextColor3=C.text, Font=FONT_MED, TextSize=10,
+		TextXAlignment=Enum.TextXAlignment.Left, AutoButtonColor=false, BorderSizePixel=0,
+		LayoutOrder=i}, navList)
+	corner(btn, 5); new("UIPadding", {PaddingLeft=UDim.new(0,6)}, btn)
+	NavButtons[entry.key] = btn
+	btn.MouseButton1Click:Connect(function()
+		if Pages[entry.key] then showPage(entry.key) end
+		requestSave()
+	end)
+end
+
+--=====================================================================
+-- 17. WINDOW BEHAVIOUR
+--=====================================================================
+do
+	local dragging, dragStart, startPos = false, nil, nil
+	titleBar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true; dragStart = input.Position; startPos = root.Position
+		end
+	end)
+	titleBar.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false; requestSave()
+		end
+	end)
+	State.connections[#State.connections+1] = UserInputService.InputChanged:Connect(function(input)
+		if not dragging then return end
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			local delta = input.Position - dragStart
+			local nx, ny = clampWindowPosition(startPos.X.Offset + delta.X, startPos.Y.Offset + delta.Y)
+			root.Position = UDim2.fromOffset(nx, ny)
+		end
+	end)
+end
+local minimized = false; local restoreSize = CONFIG.WINDOW_SIZE
+minBtn.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	if minimized then
+		restoreSize = root.Size
+		TweenService:Create(root, TweenInfo.new(0.18), {Size=UDim2.fromOffset(restoreSize.X.Offset, CONFIG.TITLE_HEIGHT)}):Play()
+		body.Visible = false; statusBar.Visible = false
+	else
+		TweenService:Create(root, TweenInfo.new(0.18), {Size=restoreSize}):Play()
+		body.Visible = true; statusBar.Visible = true
+	end
+end)
+local function shutdown()
+	if not State.running then return end
+	State.running = false
+	if _G.__TEST_SIMULATOR_INSTANCE == INSTANCE_ID then _G.__TEST_SIMULATOR_INSTANCE = nil end
+	if _G.__TEST_SIMULATOR_CLEANUP == shutdown then _G.__TEST_SIMULATOR_CLEANUP = nil end
+	SaveSystem.save()
+	for _, c in ipairs(State.connections) do pcall(function() c:Disconnect() end) end
+	State.connections = {}
+	if _G.__TEST_SIMULATOR_GUI then
+		pcall(function() _G.__TEST_SIMULATOR_GUI:Destroy() end); _G.__TEST_SIMULATOR_GUI = nil
+	end
+end
+_G.__TEST_SIMULATOR_CLEANUP = shutdown
+closeBtn.MouseButton1Click:Connect(shutdown)
+local function applyScale()
+	local cam = Workspace.CurrentCamera
+	local vp = cam and cam.ViewportSize or Vector2.new(1280,720)
+	local neededW = CONFIG.WINDOW_POSITION.X.Offset + CONFIG.WINDOW_SIZE.X.Offset
+	local neededH = CONFIG.WINDOW_POSITION.Y.Offset + CONFIG.WINDOW_SIZE.Y.Offset
+	uiScale.Scale = math.max(0.6, math.min(1, math.min(vp.X / neededW, vp.Y / neededH)))
+end
+applyScale()
+if Workspace.CurrentCamera then
+	State.connections[#State.connections+1] =
+		Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(applyScale)
+end
+
+--=====================================================================
+-- 18. INITIALIZATION SEQUENCE & REFRESH LOOPS
+--=====================================================================
+local function syncAllPagesToState()
+	for _, p in pairs(Pages) do if p.update then pcall(p.update) end end
+end
+local function refreshAll()
+	resolvePending()
+	if Cache and Cache.Get then pcall(function() Cache:Update() end) end
+	JellySettings.readFromCache()
+	local page = Pages[State.currentPage]
+	if page and page.update then
+		local ok, err = pcall(page.update)
+		if not ok then warn("[Test Simulator] refresh error: "..tostring(err)) end
+	end
+end
+task.spawn(function()
+	setLoadingProgress("Initializing interface...", 0.1)
+	setLoadingProgress("Loading player data...", 0.2)
+	if Cache then pcall(function() Cache:Update() end) end
+	setLoadingProgress("Creating feature pages...", 0.3)
+	local builders = {
+		{name="Dashboard",fn=buildDashboard,key="Dashboard"},
+		{name="Royal Jelly",fn=buildRoyalJelly,key="RoyalJelly"},
+		{name="Eggs",fn=buildEggs,key="Eggs"},
+		{name="Blender",fn=buildBlender,key="Blender"},
+		{name="Tickets",fn=buildTickets,key="Tickets"},
+		{name="Player Info",fn=buildPlayerInfo,key="PlayerInfo"},
+		{name="Inventory",fn=buildInventory,key="Inventory"},
+		{name="Recipes",fn=buildRecipes,key="RecipeCalc"},
+		{name="Quest",fn=buildQuest,key="Quest"},
+		{name="Gear Reqs",fn=buildGearRequirements,key="GearRequirements"},
+		{name="Build Hive",fn=buildBuildHive,key="BuildHive"},
+		{name="Auto Buy",fn=buildAutoBuy,key="AutoBuy"},
+	}
+	local builtCount = 0
+	for i, b in ipairs(builders) do
+		local ok, err = pcall(b.fn)
+		if ok then builtCount = builtCount + 1
+		else warn("[Test Simulator] Failed to build "..b.name..": "..tostring(err)) end
+		setLoadingProgress("Created "..b.name.."...", 0.3 + (i / #builders) * 0.4)
+	end
+	setLoadingProgress("Connecting navigation...", 0.7); task.wait(0.1)
+	setLoadingProgress("Restoring saved settings...", 0.8)
+	if loadedCfg then pcall(function() SaveSystem.applyWindowPos(loadedCfg) end) end
+	syncAllPagesToState()
+	setLoadingProgress("Loading complete!", 1.0); task.wait(0.2)
+	loadingScreen.Visible = false; showPage("Dashboard"); uiReady = true
+	if builtCount < #builders then setStatus("Ready, but some pages failed.", "warn")
+	elseif SaveSystem.isSupported() and not loadedCfg then
+		setStatus("Ready. No saved settings — will save on change.", "info")
+	elseif SaveSystem.isSupported() and loadedCfg then setStatus("Ready. Settings loaded.", "info")
+	else setStatus("Ready (persistence unavailable).", "warn") end
+
+	print("[Test Simulator] === BUILD HIVE DIAGNOSTICS ===")
+	print("  BeeTypes module:", BeeTypes and "loaded" or "MISSING")
+	print("  Build cadence:", tostring(CONFIG.BUILD_TICK_INTERVAL).."s")
+	print("  StageControl wait: retry="..tostring(StageControl.RETRY_INTERVAL).."s max="..tostring(StageControl.MAX_WAIT).."s")
+	print("  Priority list:", table.concat(BuildHive.priorityOrder, ", "))
+	print("  Target list:", table.concat(BuildHive.targetOrder, ", "))
+	do
+		local cells = scanHive()
+		if cells then
+			local state, priorityCounts, stage = computeAll(cells)
+			print("  Stage:", stage)
+			for _, name in ipairs(BuildHive.priorityOrder) do
+				print(string.format("  [PRIORITY] %s: %d/%d",
+					name, priorityCounts[name] or 0, BuildHive.priority[name]))
+			end
+			for _, name in ipairs(BuildHive.targetOrder) do
+				local s = state[name]
+				print(string.format("  [TARGET] %s: %d/%d — %s %s",
+					name, s.current, s.target, s.category,
+					s.delta ~= 0 and ("("..s.delta..")") or ""))
+			end
+			local plan = planNextAction(cells)
+			print("  Next plan:", plan.action,
+				plan.targetBee and ("target="..plan.targetBee) or "",
+				plan.reason and ("reason="..plan.reason) or "")
+		else print("  Cannot read Honeycomb — cache may still be loading") end
+	end
+	print("[Test Simulator] === END BUILD HIVE ===")
+	print("[Test Simulator] === DIAGNOSTICS ===")
+	print("  Instance:", INSTANCE_ID)
+	print("  Pages built:", builtCount.."/"..#builders)
+	print("  Quests module:", Quests and "loaded" or "MISSING")
+	print("  Events module:", Events and "loaded" or "MISSING")
+	print("[Test Simulator] === END ===")
+
+	task.spawn(function()
+		while State.running and _G.__TEST_SIMULATOR_INSTANCE == INSTANCE_ID do
+			local ok, err = pcall(BuildHive.tick)
+			if not ok then
+				warn("[BuildHive] tick error: " .. tostring(err))
+				BuildHive.status = "Error: " .. tostring(err)
+			end
+			task.wait(CONFIG.BUILD_TICK_INTERVAL)
+		end
+	end)
+
+	while State.running and _G.__TEST_SIMULATOR_INSTANCE == INSTANCE_ID do
+		pcall(refreshAll)
+		pcall(tickToys)
+		pcall(RJAuto.tick)
+		pcall(DiamondAuto.tick)
+		pcall(MagicBeanAuto.tick)
+		pcall(tryAutoCondenser)
+		pcall(tryQuestAuto)
+		pcall(BlenderAuto.tick)
+		task.wait(CONFIG.REFRESH_INTERVAL)
+	end
+end)
